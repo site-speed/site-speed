@@ -1,0 +1,1 @@
+package.json { "name": "user-readme-badge-generator", "description": "An action to create markdown badges for your GitHub user profile's README.md file (supports both organizations and personal accounts)", "version": "1.0.0", "private": true, "type": "module", "engines": { "node": ">=24" }, "dependencies": { "@actions/core": "^3.0.1", "@octokit/graphql": "^9.0.3" } }
