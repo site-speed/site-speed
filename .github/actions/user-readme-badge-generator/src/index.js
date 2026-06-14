@@ -221,6 +221,7 @@ export const getRepositories = async (username, graphqlClient) => {
   return repositories;
 };
 
+
 export const getPullRequestsCount = async (username, repo, prFilterDate, graphqlClient) => {
   let endCursor;
   let hasNextPage = true;
@@ -252,11 +253,12 @@ export const getPullRequestsCount = async (username, repo, prFilterDate, graphql
     const pullRequests = repository.pullRequests.nodes;
     core.debug(`repo=${repo} pagePullRequests=${pullRequests.length}`);
 
-    const openPullRequests = pullRequests.filter(pr => new Date(pr.createdAt) >= new Date(prFilterDate));
-    core.debug(`repo=${repo} openAfterFilter=${openPullRequests.length} (filterDate=${prFilterDate})`);
+    // PRs created after the filter date
+    const openAfterFilter = pullRequests.filter(pr => new Date(pr.createdAt) >= new Date(prFilterDate));
+    core.debug(`repo=${repo} openAfterFilter=${openAfterFilter.length} (filterDate=${prFilterDate})`);
+    total += openAfterFilter.length;
 
-    total += openPullRequests.length;
-
+    // Merged PRs (guard mergedAt) after the filter date
     const mergedPRs = pullRequests.filter(
       pr => pr.state === 'MERGED' && pr.mergedAt && new Date(pr.mergedAt) >= new Date(prFilterDate)
     );
@@ -266,6 +268,12 @@ export const getPullRequestsCount = async (username, repo, prFilterDate, graphql
     hasNextPage = repository.pullRequests.pageInfo.hasNextPage;
     endCursor = repository.pullRequests.pageInfo.endCursor;
   }
+
+  return {
+    total,
+    merged
+  };
+};
 
   return {
     total,
@@ -326,7 +334,6 @@ export const generateBadges = async (
   try {
     // repo count
     const repos = await getRepositories(username, client);
-    getRepositories(username, client);
     core.debug(`Fetched ${repos.length} repositories: ${repos.slice(0,20).join(', ')}`);
     const repoCount = repos.length;
     core.info(`Total repositories: ${repoCount}`);
