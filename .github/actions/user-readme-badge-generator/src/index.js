@@ -24,7 +24,7 @@ export function validateRequiredInput(input, label) {
 export function createGraphqlClient(authToken, baseUrl = DEFAULT_GRAPHQL_URL) {
   let client = graphql.defaults({
     headers: {
-      authorization: `token ${authToken}`
+      authorization: `bearer ${authToken}`
     }
   });
 
@@ -250,6 +250,18 @@ export const getPullRequestsCount = async (username, repo, prFilterDate, graphql
     );
 
     const pullRequests = repository.pullRequests.nodes;
+    core.debug(`repo=${repo} pagePullRequests=${pullRequests.length}`);
+
+    const openPullRequests = pullRequests.filter(pr => new Date(pr.createdAt) >= new Date(prFilterDate));
+    core.debug(`repo=${repo} openAfterFilter=${openPullRequests.length} (filterDate=${prFilterDate})`);
+
+    total += openPullRequests.length;
+
+    const mergedPRs = pullRequests.filter(
+      pr => pr.state === 'MERGED' && pr.mergedAt && new Date(pr.mergedAt) >= new Date(prFilterDate)
+    );
+    core.debug(`repo=${repo} mergedAfterFilter=${mergedPRs.length}`);
+    merged += mergedPRs.length;
 
     const openPullRequests = pullRequests.filter(pr => new Date(pr.createdAt) >= new Date(prFilterDate));
     total += openPullRequests.length;
@@ -322,6 +334,8 @@ export const generateBadges = async (
   try {
     // repo count
     const repos = await getRepositories(username, client);
+    getRepositories(username, client);
+    core.debug(`Fetched ${repos.length} repositories: ${repos.slice(0,20).join(', ')}`);
     const repoCount = repos.length;
     core.info(`Total repositories: ${repoCount}`);
     // pull requests
