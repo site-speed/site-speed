@@ -74,3 +74,14 @@ jobs:
             git commit -m "docs: update readme badges"
             git push
           fi
+
+      - name: Test GraphQL token access
+        run: |
+          cat > /tmp/query.graphql <<'GRAPHQL'
+          query { viewer { login } }
+          GRAPHQL
+          curl -s -X POST -H "Authorization: bearer ${{ steps.app-token.outputs.token }}" \
+            -H "Content-Type: application/json" \
+            -d '{"query":"query { viewer { login } }"}' \
+            https://api.github.com/graphql | jq .
+            
