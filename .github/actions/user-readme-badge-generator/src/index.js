@@ -586,7 +586,7 @@ export const generateBadges = async (
       core.error(`User lookup failed: ${e.message}`);
       throw e;
     }
-    core.info(Timestamp: user lookup at ${new Date().toISOString()});
+    core.info(`Timestamp: user lookup at ${new Date().toISOString()}`);
      
     // Repositories (filtered)
     const repos = await getRepositories(username, client, excludeForks);
