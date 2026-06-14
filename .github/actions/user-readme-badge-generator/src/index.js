@@ -7,8 +7,8 @@ const DEFAULT_DAYS = 30;
 const DEFAULT_GRAPHQL_URL = 'https://api.github.com/graphql';
 const DEFAULT_COLOR = 'blue';
 const DEFAULT_LABEL_COLOR = '555';
-const DEFAULT_BATCH_SIZE = 5;
-const DEFAULT_DELAY_MS = 1000; // ms
+const DEFAULT_BATCH_SIZE = 1;
+const DEFAULT_DELAY_MS = 2000; // ms
 
 /* -------------------------
    Helpers
