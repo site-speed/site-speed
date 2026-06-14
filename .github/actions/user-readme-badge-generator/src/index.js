@@ -592,7 +592,7 @@ export const generateBadges = async (
     const repos = await getRepositories(username, client, excludeForks);
     core.info(`Fetched ${repos.length} repositories (excludeForks=${excludeForks}): ${repos.slice(0, 20).join(', ')}`);
     const repoCount = repos.length;
-    core.info(`Timestamp: repos fetched at ${new Date().toISOString()})`;
+    core.info(`Timestamp: repos fetched at ${new Date().toISOString()}`);
 
     // date window
     const date = new Date();
