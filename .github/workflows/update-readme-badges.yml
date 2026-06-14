@@ -42,6 +42,7 @@ jobs:
         id: user-readme-badge-generator
         working-directory: ./.github/actions/user-readme-badge-generator
         run: |
+          set -euo pipefail
           # prefer npm ci for reproducible installs when lockfile exists
           if [ -f package-lock.json ]; then
             npm ci --no-audit --no-fund
@@ -65,6 +66,9 @@ jobs:
           INPUT_DAYS: '30'
           INPUT_COLOR: 'blue'
           INPUT_LABEL_COLOR: '555'
+          INPUT_EXCLUDE_FORKS: 'true'                  # <= new input: 'true' (default) or 'false'
+          INPUT_BATCH_SIZE: '5'
+          INPUT_DELAY_MS: '3000'
     
       - name: write to job summary
         run: |
