@@ -10,6 +10,8 @@ on:
 
 permissions:
   contents: write
+  pull-requests: read
+  metadata: read
 
 jobs:
   generate-badges:
@@ -56,7 +58,8 @@ jobs:
           node src/index.js
         env:
           INPUT_USERNAME: ${{ github.repository_owner }}
-          INPUT_TOKEN: ${{ steps.app-token.outputs.token }}
+          # INPUT_TOKEN: ${{ steps.app-token.outputs.token }}
+          INPUT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           INPUT_GRAPHQL_URL: ${{ github.graphql_url }}
           INPUT_DAYS: '30'
           INPUT_COLOR: 'blue'
