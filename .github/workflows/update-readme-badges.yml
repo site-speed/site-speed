@@ -1,118 +1,245 @@
-name: update-readme-badges
+import * as core from '@actions/core';
+import { graphql } from '@octokit/graphql';
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+// Default values
+const DEFAULT_DAYS = 30;
+const DEFAULT_GRAPHQL_URL = 'https://api.github.com/graphql';
+const DEFAULT_COLOR = 'blue';
+const DEFAULT_LABEL_COLOR = '555';
 
-on:
-  schedule:
-    - cron: '0 7 * * *' # runs daily at 07:00
-  workflow_dispatch:
+// Tuning: batch size and delay between batches to respect rate limits
+const DEFAULT_BATCH_SIZE = 5;
+const DEFAULT_DELAY_MS = 1000; // 1s between batches
 
-permissions:
-  contents: write
-  pull-requests: read
-  artifact-metadata: read
-  
+// Exported function for validating required inputs
+export function validateRequiredInput(input, label) {
+  if (!input) {
+    throw new Error(`${label} is required`);
+  }
+  return input;
+}
 
-jobs:
-  generate-badges:
-    runs-on: ubuntu-latest
+/**
+ * Sleep helper
+ */
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
-    steps:
-      - uses: actions/checkout@v6.0.3
+/**
+ * Basic exponential backoff wrapper for async functions
+ */
+async function withBackoff(fn, { retries = 4, baseDelay = 500 } = {}) {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await fn();
+    } catch (err) {
+      attempt++;
+      if (attempt > retries) throw err;
+      const delay = baseDelay * Math.pow(2, attempt - 1);
+      core.debug(`Transient error: ${err.message}. Retrying in ${delay}ms (attempt ${attempt}/${retries})`);
+      await sleep(delay);
+    }
+  }
+}
 
-      - uses: actions/create-github-app-token@v3
-        id: app-token
-        with:
-          client-id: ${{ vars.APP_CLIENT_ID }}
-          private-key: ${{ secrets.PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
+/**
+ * Creates a GraphQL client with authentication
+ */
+export function createGraphqlClient(authToken, baseUrl = DEFAULT_GRAPHQL_URL) {
+  let client = graphql.defaults({
+    headers: {
+      authorization: `bearer ${authToken}`
+    }
+  });
 
-      - name: Setup Node 24
-        uses: actions/setup-node@v6.4.0
-        with:
-          node-version: '24.x'
+  if (baseUrl && baseUrl !== DEFAULT_GRAPHQL_URL) {
+    client = client.defaults({
+      baseUrl: baseUrl
+    });
+  }
 
-      - name: Confirm node & npm
-        run: |
-          node --version
-          npm --version
+  return client;
+}
 
-      - name: install & run user-readme-badge-generator
-        id: user-readme-badge-generator
-        working-directory: ./.github/actions/user-readme-badge-generator
-        run: |
-          set -euo pipefail
-          # prefer npm ci for reproducible installs when lockfile exists
-          if [ -f package-lock.json ]; then
-            npm ci --no-audit --no-fund
-          else
-            npm install --no-audit --no-fund
-          fi
+/**
+ * Initializes configuration from GitHub Actions inputs
+ */
+export function initializeConfig() {
+  const username = core.getInput('username');
+  const tkn = core.getInput('token');
+  const daysInput = core.getInput('days');
+  let numDays = DEFAULT_DAYS;
+  if (daysInput) {
+    const parsedDays = Number(daysInput);
+    if (!Number.isInteger(parsedDays) || parsedDays <= 0) {
+      throw new Error(`Invalid 'days' input: must be a positive integer`);
+    }
+    numDays = parsedDays;
+  }
+  const gqlUrl = core.getInput('graphql_url') || DEFAULT_GRAPHQL_URL;
+  const badgeColor = core.getInput('color') || DEFAULT_COLOR;
+  const badgeLabelColor = core.getInput('label_color') || DEFAULT_LABEL_COLOR;
 
-          echo "Installed packages:"
-          ls -la node_modules | sed -n '1,200p' || true
+  // new input: exclude forks (default true). Set to 'false' explicitly to include forks.
+  const excludeForks = core.getInput('exclude_forks') !== 'false';
 
-          # verify the octokit import works (ESM dynamic import)
-          node -e "import('@octokit/graphql').then(()=>console.log('@octokit/graphql OK')).catch(e=>{console.error('IMPORT ERROR:', e.message); process.exit(1)})"
+  validateRequiredInput(username, 'username');
+  validateRequiredInput(tkn, 'token');
 
-          # run the action
-          node src/index.js
-        env:
-          INPUT_USERNAME: ${{ github.repository_owner }}
-          INPUT_TOKEN: ${{ steps.app-token.outputs.token }}
-          # INPUT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          INPUT_GRAPHQL_URL: ${{ github.graphql_url }}
-          INPUT_DAYS: '30'
-          INPUT_COLOR: 'blue'
-          INPUT_LABEL_COLOR: '555'
-          INPUT_EXCLUDE_FORKS: 'true'                  # <= new input: 'true' (default) or 'false'
-          INPUT_BATCH_SIZE: '1'
-          INPUT_DELAY_MS: '3000'
-    
-      - name: write to job summary
-        run: |
-          echo "${{ steps.user-readme-badge-generator.outputs.badges }}" >> $GITHUB_STEP_SUMMARY
+  const client = createGraphqlClient(tkn, gqlUrl);
 
-      - name: add to readme
-        run: |
-          readme=README.md
-          
-          # get SHA256 before
-          beforeHash=$(sha256sum $readme | awk '{ print $1 }')
-          
-          # Define start and end markers
-          startMarker="<!-- start user badges -->"
-          endMarker="<!-- end user badges -->"
-          
-          replacement="${{ steps.user-readme-badge-generator.outputs.badges }}"
-          
-          # Escape special characters in the replacement text
-          replacementEscaped=$(printf '%s\n' "$replacement" | perl -pe 's/([\\\/\$\(\)@])/\\$1/g')
-          
-          # Use perl to replace the text between the markers
-          perl -i -pe "BEGIN{undef $/;} s/\Q$startMarker\E.*?\Q$endMarker\E/$startMarker\n$replacementEscaped\n$endMarker/smg" $readme
-          # get SHA256 after
-          afterHash=$(sha256sum $readme | awk '{ print $1 }')
-          # Compare the hashes and commit if required
-          if [ "$afterHash" = "$beforeHash" ]; then
-            echo "The hashes are equal - exiting script"
-            exit 0
-          else
-            git config --global user.name 'github-actions[bot]'
-            git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-            git add $readme
-            git commit -m "docs: update readme badges"
-            git push
-          fi
+  return {
+    username,
+    token: tkn,
+    days: numDays,
+    graphqlUrl: gqlUrl,
+    color: badgeColor,
+    labelColor: badgeLabelColor,
+    graphqlClient: client,
+    batchSize: Number(core.getInput('batch_size') || DEFAULT_BATCH_SIZE),
+    delayMs: Number(core.getInput('delay_ms') || DEFAULT_DELAY_MS),
+    excludeForks
+  };
+}
 
-      - name: Test GraphQL token access
-        run: |
-          cat > /tmp/query.graphql <<'GRAPHQL'
-          query { viewer { login } }
-          GRAPHQL
-          curl -s -X POST -H "Authorization: bearer ${{ steps.app-token.outputs.token }}" \
-            -H "Content-Type: application/json" \
-            -d '{"query":"query { viewer { login } }"}' \
-            https://api.github.com/graphql | jq .
-            
+/**
+ * Main execution function that generates badges and sets outputs
+ */
+export async function run(config) {
+  const cfg = config || initializeConfig();
+
+  const badges = await generateBadges(
+    cfg.username,
+    cfg.token,
+    cfg.days,
+    cfg.graphqlClient,
+    cfg.color,
+    cfg.labelColor,
+    cfg.graphqlUrl,
+    cfg.batchSize,
+    cfg.delayMs,
+    cfg.excludeForks
+  );
+
+  core.info('');
+  const badgesMarkdown = badges.join(' ');
+  core.info(`Badge markdown: ${badgesMarkdown}`);
+  core.setOutput('badges', badgesMarkdown);
+
+  return badges;
+}
+
+/**
+ * Simple badge generator (shields.io)
+ */
+export const generateBadgeMarkdown = (text, number, badgeColor, badgeLabelColor) => {
+  const encodedLabel = encodeURIComponent(text);
+  const encodedMessage = encodeURIComponent(number);
+  const encodedColor = encodeURIComponent(badgeColor);
+  const encodedLabelColor = encodeURIComponent(badgeLabelColor);
+
+  const badgeUrl = `https://img.shields.io/badge/${encodedLabel}-${encodedMessage}-${encodedColor}?labelColor=${encodedLabelColor}`;
+  return `![${text}](${badgeUrl})`;
+};
+
+/* -------------------------
+   GraphQL search helpers
+   ------------------------- */
+
+export const getSearchCount = async (client, query) => {
+  try {
+    const res = await withBackoff(() =>
+      client(
+        `query ($q: String!) {
+           search(query: $q, type: ISSUE, first: 1) {
+             issueCount
+           }
+         }`,
+        { q: query }
+      )
+    );
+    return res?.search?.issueCount || 0;
+  } catch (err) {
+    core.error(`Search query failed for q="${query}": ${err.message}`);
+    return 0;
+  }
+};
+
+/* -------------------------
+   REST helpers (fetch)
+   ------------------------- */
+
+const restFetch = async (url, token, opts = {}) => {
+  const headers = Object.assign(
+    {
+      Authorization: `bearer ${token}`,
+      Accept: opts.accept || 'application/vnd.github.v3+json',
+      'User-Agent': 'site-speed-readme-badge-generator'
+    },
+    opts.headers || {}
+  );
+
+  const response = await fetch(url, { headers, method: opts.method || 'GET' });
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new Error(`HTTP ${response.status} ${response.statusText} - ${text}`);
+  }
+  const json = await response.json();
+  return { json, response };
+};
+
+/* -------------------------
+   Repository helpers (user-only)
+   ------------------------- */
+
+export const getUserData = async (username, graphqlClient) => {
+  try {
+    const { user } = await graphqlClient(
+      `
+      query ($login: String!) {
+        user(login: $login) {
+          repositories(first: 1) {
+            totalCount
+          }
+        }
+      }`,
+      { login: username }
+    );
+
+    if (!user) {
+      throw new Error(`Could not find a user with login: ${username}`);
+    }
+    return user;
+  } catch (err) {
+    throw new Error(`User lookup failed for '${username}': ${err.message}`);
+  }
+};
+
+/**
+ * Fetch repositories for a user and optionally exclude forks
+ */
+export const getRepositories = async (username, graphqlClient, excludeForks = true) => {
+  let endCursor = null;
+  let hasNextPage = true;
+  const repositories = [];
+
+  while (hasNextPage) {
+    const response = await withBackoff(() =>
+      graphqlClient(
+        `
+        query ($login: String!, $after: String) {
+          user(login: $login) {
+            repositories(first: 100, after: $after, affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER]) {
+              nodes {
+                name
+                isFork
+              }
+              pageInfo {
+                endCursor
+                hasNextPage
+              }
+            }
+          }
+        }`,
+        { login: username*
+
