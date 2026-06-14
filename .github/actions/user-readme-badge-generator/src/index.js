@@ -258,7 +258,7 @@ export const getPullRequestsCount = async (username, repo, prFilterDate, graphql
     core.debug(`repo=${repo} openAfterFilter=${openAfterFilter.length} (filterDate=${prFilterDate})`);
     total += openAfterFilter.length;
 
-    // Merged PRs (guard mergedAt) after the filter date
+    // Merged PRs after the filter date (guard mergedAt)
     const mergedPRs = pullRequests.filter(
       pr => pr.state === 'MERGED' && pr.mergedAt && new Date(pr.mergedAt) >= new Date(prFilterDate)
     );
@@ -268,12 +268,6 @@ export const getPullRequestsCount = async (username, repo, prFilterDate, graphql
     hasNextPage = repository.pullRequests.pageInfo.hasNextPage;
     endCursor = repository.pullRequests.pageInfo.endCursor;
   }
-
-  return {
-    total,
-    merged
-  };
-};
 
   return {
     total,
