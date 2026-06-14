@@ -29,7 +29,7 @@ async function withBackoff(fn, { retries = 4, baseDelay = 500 } = {}) {
       attempt++;
       if (attempt > retries) throw err;
       const delay = baseDelay * Math.pow(2, attempt - 1);
-      core.debug(`Transient error: ${err.message}. Retrying in ${delay}ms (attempt ${attempt}/${retries})`);
+      core.info(`Transient error: ${err.message}. Retrying in ${delay}ms (attempt ${attempt}/${retries})`);
       await sleep(delay);
     }
   }
@@ -339,12 +339,12 @@ export const getCommitsCountForRepo = async (token, owner, repo, sinceIso, clien
       );
       const count = gqlRes?.repository?.defaultBranchRef?.target?.history?.totalCount;
       if (typeof count === 'number') {
-        core.debug(`GraphQL commit history for ${owner}/${repo} since ${sinceIso}: ${count}`);
+        core.info(`GraphQL commit history for ${owner}/${repo} since ${sinceIso}: ${count}`);
         return count;
       }
-      core.debug(`GraphQL commit totalCount not available for ${owner}/${repo}; falling back to REST search`);
+      core.info(`GraphQL commit totalCount not available for ${owner}/${repo}; falling back to REST search`);
     } catch (err) {
-      core.debug(`GraphQL commit count failed for ${owner}/${repo}: ${err.message}`);
+      core.info(`GraphQL commit count failed for ${owner}/${repo}: ${err.message}`);
       // fall through to REST fallback
     }
   }
@@ -395,7 +395,7 @@ export const getCodeStatsFromCommits = async (token, owner, repo, daysWindow = 3
       );
       defaultBranch = gql?.repository?.defaultBranchRef?.name || null;
     } catch (err) {
-      core.debug(`Failed to fetch default branch for ${owner}/${repo}: ${err.message}`);
+      core.info(`Failed to fetch default branch for ${owner}/${repo}: ${err.message}`);
     }
   }
   const shaParam = defaultBranch ? `&sha=${encodeURIComponent(defaultBranch)}` : '';
@@ -424,7 +424,7 @@ export const getCodeStatsFromCommits = async (token, owner, repo, daysWindow = 3
 
     for (const c of commitsPage) {
       if (processed >= maxCommits) {
-        core.warn(`Reached maxCommits (${maxCommits}) for ${owner}/${repo}; stopping per-commit aggregation`);
+        core.info(`Reached maxCommits (${maxCommits}) for ${owner}/${repo}; stopping per-commit aggregation`);
         break outer;
       }
       const sha = c.sha;
@@ -435,7 +435,7 @@ export const getCodeStatsFromCommits = async (token, owner, repo, daysWindow = 3
         additions += Number(stats.additions || 0);
         deletions += Number(stats.deletions || 0);
       } catch (err) {
-        core.debug(`Failed to fetch commit ${sha} for ${owner}/${repo}: ${err.message}`);
+        core.info(`Failed to fetch commit ${sha} for ${owner}/${repo}: ${err.message}`);
       }
       processed++;
       await sleep(50);
@@ -464,18 +464,18 @@ export const getCodeFrequencyForRepo = async (token, owner, repo, daysWindow = 3
       const res = await fetch(url, { headers, method: 'GET' });
       if (res.status === 202) {
         const delay = Math.min(60000, 1000 * Math.pow(2, attempt - 1));
-        core.debug(`code_frequency for ${owner}/${repo} returned 202 (computing). attempt=${attempt}, retrying in ${delay}ms`);
+        core.info(`code_frequency for ${owner}/${repo} returned 202 (computing). attempt=${attempt}, retrying in ${delay}ms`);
         await sleep(delay);
         continue;
       }
       if (!res.ok) {
         const text = await res.text().catch(() => '');
-        core.debug(`code_frequency HTTP ${res.status} for ${owner}/${repo}: ${text}`);
+        core.info(`code_frequency HTTP ${res.status} for ${owner}/${repo}: ${text}`);
         return null;
       }
       const json = await res.json();
       if (!Array.isArray(json)) {
-        core.debug(`code_frequency non-array for ${owner}/${repo}: ${JSON.stringify(json).slice(0, 500)}`);
+        core.info(`code_frequency non-array for ${owner}/${repo}: ${JSON.stringify(json).slice(0, 500)}`);
         return null;
       }
       const cutoff = Date.now() - daysWindow * 24 * 60 * 60 * 1000;
@@ -492,7 +492,7 @@ export const getCodeFrequencyForRepo = async (token, owner, repo, daysWindow = 3
       }
       return { additions, deletions };
     } catch (err) {
-      core.debug(`code_frequency attempt ${attempt} failed for ${owner}/${repo}: ${err.message}`);
+      core.info(`code_frequency attempt ${attempt} failed for ${owner}/${repo}: ${err.message}`);
       await sleep(500 * attempt);
     }
   }
@@ -508,14 +508,14 @@ const processReposInBatches = async (repos, owner, token, client, metricFn, batc
   const results = {};
   for (let i = 0; i < repos.length; i += batchSize) {
     const batch = repos.slice(i, i + batchSize);
-    core.debug(`Processing batch ${Math.floor(i / batchSize) + 1} (${batch.length} repos)`);
+    core.info(`Processing batch ${Math.floor(i / batchSize) + 1} (${batch.length} repos)`);
     const promises = batch.map((r) => metricFn(owner, r, token, client));
     const resolved = await Promise.all(promises);
     for (let j = 0; j < batch.length; j++) {
       results[batch[j]] = resolved[j];
     }
     if (i + batchSize < repos.length) {
-      core.debug(`Sleeping ${delayMs}ms before next batch`);
+      core.info(`Sleeping ${delayMs}ms before next batch`);
       await sleep(delayMs);
     }
   }
@@ -586,17 +586,19 @@ export const generateBadges = async (
       core.error(`User lookup failed: ${e.message}`);
       throw e;
     }
-
+    core.info(Timestamp: user lookup at ${new Date().toISOString()});
+     
     // Repositories (filtered)
     const repos = await getRepositories(username, client, excludeForks);
     core.info(`Fetched ${repos.length} repositories (excludeForks=${excludeForks}): ${repos.slice(0, 20).join(', ')}`);
     const repoCount = repos.length;
+    core.info(`Timestamp: repos fetched at ${new Date().toISOString()})`;
 
     // date window
     const date = new Date();
     date.setUTCDate(date.getUTCDate() - daysCount);
     const filterDate = date.toISOString();
-    core.debug(`Filtering metrics for last ${daysCount} days since ${filterDate}`);
+    core.info(`Filtering metrics for last ${daysCount} days since ${filterDate}`);
 
     // --- ORIGINAL metrics first ---
     // PRs created
@@ -610,6 +612,7 @@ export const generateBadges = async (
       delayMs
     );
     const totalPRsCreated = Object.values(prCreatedPerRepo).reduce((s, v) => s + Number(v || 0), 0);
+    core.info(`Timestamp: counted PRs created at ${new Date().toISOString()}`);
 
     // PRs merged
     const prMergedPerRepo = await processReposInBatches(
@@ -622,7 +625,8 @@ export const generateBadges = async (
       delayMs
     );
     const totalPRsMerged = Object.values(prMergedPerRepo).reduce((s, v) => s + Number(v || 0), 0);
-
+    core.info(`Timestamp: counted PRs merged at ${new Date().toISOString()}`);
+     
     // Open PRs
     const openPRsPerRepo = await processReposInBatches(
       repos,
@@ -634,7 +638,8 @@ export const generateBadges = async (
       delayMs
     );
     const totalOpenPRs = Object.values(openPRsPerRepo).reduce((s, v) => s + Number(v || 0), 0);
-
+    core.info(`Timestamp: counted PRs open at ${new Date().toISOString()}`);
+     
     // Issues opened
     const issuesOpenedPerRepo = await processReposInBatches(
       repos,
@@ -646,6 +651,7 @@ export const generateBadges = async (
       delayMs
     );
     const totalIssuesOpened = Object.values(issuesOpenedPerRepo).reduce((s, v) => s + Number(v || 0), 0);
+    core.info(`Timestamp: counted issues opened at ${new Date().toISOString()}`);
 
     // Issues closed
     const issuesClosedPerRepo = await processReposInBatches(
@@ -658,7 +664,8 @@ export const generateBadges = async (
       delayMs
     );
     const totalIssuesClosed = Object.values(issuesClosedPerRepo).reduce((s, v) => s + Number(v || 0), 0);
-
+    core.info(`Timestamp: counted issues closed at ${new Date().toISOString()}`);
+     
     // Open issues
     const openIssuesPerRepo = await processReposInBatches(
       repos,
@@ -670,6 +677,7 @@ export const generateBadges = async (
       delayMs
     );
     const totalOpenIssues = Object.values(openIssuesPerRepo).reduce((s, v) => s + Number(v || 0), 0);
+    core.info(`Timestamp: counted issues still open at ${new Date().toISOString()}`);
 
     // Contributors exact unique:
     const contributorsListPerRepo = await processReposInBatches(
@@ -687,6 +695,7 @@ export const generateBadges = async (
       for (const id of arr) if (id) uniqueContributors.add(id);
     }
     const totalContributorsExact = uniqueContributors.size;
+    core.info(`Timestamp: counted contributors at ${new Date().toISOString()}`);
 
     // Active contributors exact unique:
     const contributorsActivePerRepo = await processReposInBatches(
@@ -704,6 +713,7 @@ export const generateBadges = async (
       for (const id of arr) if (id) uniqueActive.add(id);
     }
     const totalActiveContributorsExact = uniqueActive.size;
+    core.info(`Timestamp: counted active contributors at ${new Date().toISOString()}`);
 
     // ------- Commits (preferred GraphQL) -------
     const commitsPerRepo = await processReposInBatches(
@@ -716,6 +726,7 @@ export const generateBadges = async (
       delayMs
     );
     const totalCommits = Object.values(commitsPerRepo).reduce((s, v) => s + Number(v || 0), 0);
+    core.info(`Timestamp: counted commits at ${new Date().toISOString()}`);
 
     // ------- Lines added/deleted: use code_frequency, fallback to per-commit conditional -------
     const codeFreqPerRepo = {};
@@ -724,18 +735,21 @@ export const generateBadges = async (
 
     for (const repoName of repos) {
       try {
+        core.info(`Timestamp: start processing ${repoName} at ${new Date().toISOString()}`);
         const freq = await getCodeFrequencyForRepo(tokenParam, username, repoName, daysCount);
-        core.debug(`code_frequency raw for ${repoName}: ${JSON.stringify(freq)}`);
+        core.info(`code_frequency raw for ${repoName}: ${JSON.stringify(freq)}`);
         if (freq !== null) {
+          core.info(`Timestamp: start code_frequency for ${repoName} at ${new Date().toISOString()}`); 
           codeFreqPerRepo[repoName] = freq;
-          core.debug(`code_frequency for ${repoName}: +${freq.additions} / -${freq.deletions}`);
+          core.info(`code_frequency for ${repoName}: +${freq.additions} / -${freq.deletions}`);
+          core.info(`Timestamp: done code_frequency for ${repoName} at ${new Date().toISOString()}`);
           continue;
         }
 
         const repoCommitCount = Number(commitsPerRepo[repoName] || 0);
         if (repoCommitCount === 0) {
           codeFreqPerRepo[repoName] = { additions: 0, deletions: 0 };
-          core.debug(`Skipping per-commit fallback for ${repoName} (0 commits in window).`);
+          core.info(`Skipping per-commit fallback for ${repoName} (0 commits in window).`);
           continue;
         }
 
@@ -745,7 +759,9 @@ export const generateBadges = async (
           continue;
         }
 
+        core.info(`Timestamp: start per-commit fallback for ${repoName} at ${new Date().toISOString()}`); 
         const fallback = await getCodeStatsFromCommits(tokenParam, username, repoName, daysCount, MAX_COMMIT_FALLBACK, client);
+        core.info(`Timestamp: done per-commit fallback for ${repoName} at ${new Date().toISOString()}`);
         codeFreqPerRepo[repoName] = fallback;
         core.info(`Per-commit fallback for ${repoName}: +${fallback.additions} / -${fallback.deletions} (commits=${repoCommitCount})`);
       } catch (err) {
@@ -754,6 +770,7 @@ export const generateBadges = async (
       }
     }
 
+    core.info(`Timestamp: totals computation start at ${new Date().toISOString()}`);
     let totalAdditions = 0;
     let totalDeletions = 0;
     for (const val of Object.values(codeFreqPerRepo)) {
@@ -775,6 +792,7 @@ export const generateBadges = async (
     core.info(`Total commits in last ${daysCount} days: ${totalCommits}`);
     core.info(`Total lines added in last ${daysCount} days: ${totalAdditions}`);
     core.info(`Total lines deleted in last ${daysCount} days: ${totalDeletions}`);
+    core.info(`Timestamp: totals computation end at ${new Date().toISOString()}`);
 
     // Build badges in requested order
     const badges = [
@@ -791,6 +809,7 @@ export const generateBadges = async (
       generateBadgeMarkdown(`Lines added (last ${daysCount} days)`, totalAdditions, msgColor, lblColor),
       generateBadgeMarkdown(`Lines deleted (last ${daysCount} days)`, totalDeletions, msgColor, lblColor)
     ];
+    core.info(`Timestamp: badges built at ${new Date().toISOString()}`);
 
     return badges;
   } catch (error) {
