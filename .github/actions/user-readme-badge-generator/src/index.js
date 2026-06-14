@@ -508,14 +508,14 @@ const processReposInBatches = async (repos, owner, token, client, metricFn, batc
   const results = {};
   for (let i = 0; i < repos.length; i += batchSize) {
     const batch = repos.slice(i, i + batchSize);
-    core.info(`Processing batch ${Math.floor(i / batchSize) + 1} (${batch.length} repos)`);
+    core.debug(`Processing batch ${Math.floor(i / batchSize) + 1} (${batch.length} repos)`);
     const promises = batch.map((r) => metricFn(owner, r, token, client));
     const resolved = await Promise.all(promises);
     for (let j = 0; j < batch.length; j++) {
       results[batch[j]] = resolved[j];
     }
     if (i + batchSize < repos.length) {
-      core.info(`Sleeping ${delayMs}ms before next batch`);
+      core.debug(`Sleeping ${delayMs}ms before next batch`);
       await sleep(delayMs);
     }
   }
