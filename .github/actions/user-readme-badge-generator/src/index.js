@@ -540,7 +540,7 @@ export const generateBadges = async (
     const repos = await getRepositories(username, client, excludeForks);
     core.info(`Fetched ${repos.length} repositories (excludeForks=${excludeForks}): ${repos.slice(0, 20).join(', ')}`);
     const repoCount = repos.length;
-    core.info(`Total repositories: ${repoCount}`);
+    core.info(`My repositories: ${repoCount}`);
 
     // date window
     const date = new Date();
@@ -548,7 +548,7 @@ export const generateBadges = async (
     const filterDate = date.toISOString();
     core.debug(`Filtering metrics for last ${daysCount} days since ${filterDate}`);
 
-    // --- ORIGINAL METRICS: Total repos, PRs created, Merged PRs (first) ---
+    // --- ORIGINAL METRICS: My repos, PRs created, Merged PRs (first) ---
 
     // PRs created in last N days
     const prCreatedPerRepo = await processReposInBatches(
@@ -697,7 +697,7 @@ export const generateBadges = async (
     }
 
     // Diagnostics
-    core.info(`Total repositories: ${repoCount}`);
+    core.info(`My repositories: ${repoCount}`);
     core.info(`Total PRs created in last ${daysCount} days: ${totalPRsCreated}`);
     core.info(`Total PRs merged in last ${daysCount} days: ${totalPRsMerged}`);
     core.info(`Total Open PRs: ${totalOpenPRs}`);
@@ -712,7 +712,7 @@ export const generateBadges = async (
 
     // Build badges in requested order:
     const badges = [
-      generateBadgeMarkdown(`Total repositories`, repoCount, msgColor, lblColor),
+      generateBadgeMarkdown(`My repositories`, repoCount, msgColor, lblColor),
       generateBadgeMarkdown(`PRs created in last ${daysCount} days`, totalPRsCreated, msgColor, lblColor),
       generateBadgeMarkdown(`Merged PRs in last ${daysCount} days`, totalPRsMerged, msgColor, lblColor),
       generateBadgeMarkdown(`Open PRs`, totalOpenPRs, msgColor, lblColor),
