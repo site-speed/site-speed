@@ -325,6 +325,28 @@ export const generateBadges = async (
     client = createGraphqlClient(tokenParam, graphqlUrl);
   }
 
+  // Diagnostic: print who the GraphQL client authenticates as and confirm target account exists
+  try {
+    const viewerResp = await client(`query { viewer { login } }`);
+    core.info(`GraphQL viewer login: ${viewerResp.viewer?.login || '(no viewer)'}`);
+  } catch (e) {
+    core.error(`Viewer query failed: ${e.message}`);
+  }
+
+  try {
+    // Quick check: does user/org exist and what is the repository totalCount?
+    const lookup = await client(
+      `query ($login: String!) {
+         user(login: $login) { repositories(first:1) { totalCount } }
+         organization(login: $login) { repositories(first:1) { totalCount } }
+       }`,
+      { login: cfg ? cfg.username : username } // adapt depending on scope where you call it
+    );
+    core.info(`Lookup for ${cfg ? cfg.username : username}: userRepoCount=${lookup.user?.repositories?.totalCount || 'NA'} organizationRepoCount=${lookup.organization?.repositories?.totalCount || 'NA'}`);
+  } catch (e) {
+    core.error(`Lookup query failed: ${e.message}`);
+  }
+  
   try {
     // repo count
     const repos = await getRepositories(username, client);
