@@ -449,57 +449,6 @@ export const getCodeStatsFromCommits = async (token, owner, repo, daysWindow = 3
   return { additions, deletions };
 };
 
-// code_frequency: return object or null if unavailable (202 or missing)
-export const getCodeFrequencyForRepo = async (token, owner, repo, daysWindow = 30) => {
-  const url = `https://api.github.com/repos/${owner}/${repo}/stats/code_frequency`;
-  const headers = {
-    Authorization: `bearer ${token}`,
-    Accept: 'application/vnd.github.v3+json',
-    'User-Agent': 'site-speed-readme-badge-generator'
-  };
-
-  const maxAttempts = 5;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const res = await fetch(url, { headers, method: 'GET' });
-      if (res.status === 202) {
-        const delay = Math.min(120000, 10000 * Math.pow(2, attempt - 1));
-        core.info(`code_frequency for ${owner}/${repo} returned 202 (computing). attempt=${attempt}, retrying in ${delay}ms`);
-        await sleep(delay);
-        continue;
-      }
-      if (!res.ok) {
-        const text = await res.text().catch(() => '');
-        core.info(`code_frequency HTTP ${res.status} for ${owner}/${repo}: ${text}`);
-        return null;
-      }
-      const json = await res.json();
-      if (!Array.isArray(json)) {
-        core.info(`code_frequency non-array for ${owner}/${repo}: ${JSON.stringify(json).slice(0, 500)}`);
-        return null;
-      }
-      const cutoff = Date.now() - daysWindow * 24 * 60 * 60 * 1000;
-      let additions = 0;
-      let deletions = 0;
-      for (const weekRow of json) {
-        const weekUnix = (weekRow[0] || 0) * 1000;
-        const add = Number(weekRow[1] || 0);
-        const del = Math.abs(Number(weekRow[2] || 0));
-        if (weekUnix >= cutoff) {
-          additions += add;
-          deletions += del;
-        }
-      }
-      return { additions, deletions };
-    } catch (err) {
-      core.info(`code_frequency attempt ${attempt} failed for ${owner}/${repo}: ${err.message}`);
-      await sleep(500 * attempt);
-    }
-  }
-  // unavailable after retries
-  return null;
-};
-
 /* -------------------------
    Batch processing utilities
    ------------------------- */
@@ -728,58 +677,43 @@ export const generateBadges = async (
     const totalCommits = Object.values(commitsPerRepo).reduce((s, v) => s + Number(v || 0), 0);
     core.info(`Timestamp: counted commits at ${new Date().toISOString()}`);
 
-   // ------- Lines added/deleted: try code_frequency only when there are commits; fallback only when code_frequency is unavailable -------
+   // ------- Lines added/deleted: NO code_frequency; only per-commit fallback when commitCount > 0 and small -------
    const codeFreqPerRepo = {};
    const MAX_COMMIT_FALLBACK = maxCommitFallback || 1000;
    const COMMIT_FALLBACK_THRESHOLD = commitFallbackThreshold || 50;
 
    for (const repoName of repos) {
-     core.info(`Timestamp: start processing ${repoName} at ${new Date().toISOString()}`);
-     try {
-       // cheap commit count check first
-       const repoCommitCount = Number(commitsPerRepo[repoName] || 0);
-       core.info(`Commit count for ${repoName}: ${repoCommitCount}`);
+      core.info(`Timestamp: start processing ${repoName} at ${new Date().toISOString()}`);
+      try {
+          // cheap commit count check first
+          const repoCommitCount = Number(commitsPerRepo[repoName] || 0);
+          core.info(`Commit count for ${repoName}: ${repoCommitCount}`);
 
-       // If there were no commits in the window, skip expensive checks entirely
-       if (repoCommitCount === 0) {
-         codeFreqPerRepo[repoName] = { additions: 0, deletions: 0 };
-         core.info(`Skipping code_frequency and fallback for ${repoName} (0 commits in window).`);
-         continue;
-       }
+          // If there were no commits in the window, skip everything
+          if (repoCommitCount === 0) {
+            codeFreqPerRepo[repoName] = { additions: 0, deletions: 0 };
+            core.info(`Skipping per-repo stats for ${repoName} (0 commits in window).`);
+            continue;
+          }
 
-       // Try code_frequency (may return object or null if GitHub returns 202)
-       core.info(`Timestamp: start code_frequency for ${repoName} at ${new Date().toISOString()}`);
-       const freq = await getCodeFrequencyForRepo(tokenParam, username, repoName, daysCount);
-       core.info(`code_frequency raw for ${repoName}: ${JSON.stringify(freq)}`);
-       core.info(`Timestamp: done code_frequency for ${repoName} at ${new Date().toISOString()}`);
+          // If commit count is too large, skip heavy per-commit fallback to avoid long runs
+          if (repoCommitCount > COMMIT_FALLBACK_THRESHOLD || repoCommitCount > MAX_COMMIT_FALLBACK) {
+            core.info(`Skipping per-commit fallback for ${repoName} due to high commit count (${repoCommitCount}). Adjust INPUT_COMMIT_FALLBACK_THRESHOLD / INPUT_MAX_COMMIT_FALLBACK to change.`);
+            codeFreqPerRepo[repoName] = { additions: 0, deletions: 0 };
+            continue;
+          }
 
-       // If code_frequency returned data (including {0,0}), trust it and DO NOT fallback
-       if (freq !== null) {
-         codeFreqPerRepo[repoName] = freq; // may be { additions: 0, deletions: 0 }
-         core.info(`code_frequency for ${repoName}: +${freq.additions} / -${freq.deletions}`);
-         continue;
-       }
-
-       // code_frequency unavailable (freq === null) -> decide whether to run per-commit fallback
-       core.info(`code_frequency unavailable for ${repoName}; commitCount=${repoCommitCount}`);
-
-       if (repoCommitCount > COMMIT_FALLBACK_THRESHOLD || repoCommitCount > MAX_COMMIT_FALLBACK) {
-         core.info(`Skipping per-commit fallback for ${repoName} due to high commit count (${repoCommitCount}). Adjust INPUT_COMMIT_FALLBACK_THRESHOLD / INPUT_MAX_COMMIT_FALLBACK to change.`);
-         codeFreqPerRepo[repoName] = { additions: 0, deletions: 0 };
-         continue;
-       }
-
-       // Bounded per-commit fallback (restricted to default branch inside helper)
-       core.info(`Timestamp: start per-commit fallback for ${repoName} at ${new Date().toISOString()}`);
-       const fallback = await getCodeStatsFromCommits(tokenParam, username, repoName, daysCount, MAX_COMMIT_FALLBACK, client);
-       core.info(`Timestamp: done per-commit fallback for ${repoName} at ${new Date().toISOString()}`);
-       codeFreqPerRepo[repoName] = fallback || { additions: 0, deletions: 0 };
-       core.info(`Per-commit fallback for ${repoName}: +${codeFreqPerRepo[repoName].additions} / -${codeFreqPerRepo[repoName].deletions} (commits=${repoCommitCount})`);
-     } catch (err) {
-       core.error(`Code frequency processing failed for ${username}/${repoName}: ${err.message}`);
-       codeFreqPerRepo[repoName] = { additions: 0, deletions: 0 };
-     }
-   }
+          // Run bounded per-commit aggregation (restricted to default branch inside helper)
+          core.info(`Timestamp: start per-commit fallback for ${repoName} at ${new Date().toISOString()}`);
+          const fallback = await getCodeStatsFromCommits(tokenParam, username, repoName, daysCount, MAX_COMMIT_FALLBACK, client);
+          core.info(`Timestamp: done per-commit fallback for ${repoName} at ${new Date().toISOString()}`);
+          codeFreqPerRepo[repoName] = fallback || { additions: 0, deletions: 0 };
+          core.info(`Per-commit fallback for ${repoName}: +${codeFreqPerRepo[repoName].additions} / -${codeFreqPerRepo[repoName].deletions} (commits=${repoCommitCount})`);
+      } catch (err) {
+          core.error(`Code stats processing failed for ${username}/${repoName}: ${err.message}`);
+          codeFreqPerRepo[repoName] = { additions: 0, deletions: 0 };
+      }
+    }
 
     core.info(`Timestamp: totals computation start at ${new Date().toISOString()}`);
     let totalAdditions = 0;
