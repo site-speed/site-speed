@@ -67,8 +67,8 @@ jobs:
           INPUT_COLOR: 'blue'
           INPUT_LABEL_COLOR: '555'
           INPUT_EXCLUDE_FORKS: 'true'                  # <= new input: 'true' (default) or 'false'
-          INPUT_BATCH_SIZE: '3'
-          INPUT_DELAY_MS: '5000'
+          INPUT_BATCH_SIZE: '1'
+          INPUT_DELAY_MS: '3000'
     
       - name: write to job summary
         run: |
