@@ -44,9 +44,6 @@ async function withBackoff(fn, { retries = 4, baseDelay = 500 } = {}) {
 
 /**
  * Creates a GraphQL client with authentication
- * @param {string} authToken - The authentication token
- * @param {string} [baseUrl] - Optional custom GraphQL URL
- * @returns {function} The configured GraphQL client
  */
 export function createGraphqlClient(authToken, baseUrl = DEFAULT_GRAPHQL_URL) {
   let client = graphql.defaults({
@@ -55,7 +52,6 @@ export function createGraphqlClient(authToken, baseUrl = DEFAULT_GRAPHQL_URL) {
     }
   });
 
-  // Set baseUrl if a custom GraphQL URL is provided
   if (baseUrl && baseUrl !== DEFAULT_GRAPHQL_URL) {
     client = client.defaults({
       baseUrl: baseUrl
@@ -84,6 +80,9 @@ export function initializeConfig() {
   const badgeColor = core.getInput('color') || DEFAULT_COLOR;
   const badgeLabelColor = core.getInput('label_color') || DEFAULT_LABEL_COLOR;
 
+  // new input: exclude forks (default true). Set to 'false' explicitly to include forks.
+  const excludeForks = core.getInput('exclude_forks') !== 'false';
+
   validateRequiredInput(username, 'username');
   validateRequiredInput(tkn, 'token');
 
@@ -98,7 +97,8 @@ export function initializeConfig() {
     labelColor: badgeLabelColor,
     graphqlClient: client,
     batchSize: Number(core.getInput('batch_size') || DEFAULT_BATCH_SIZE),
-    delayMs: Number(core.getInput('delay_ms') || DEFAULT_DELAY_MS)
+    delayMs: Number(core.getInput('delay_ms') || DEFAULT_DELAY_MS),
+    excludeForks
   };
 }
 
@@ -117,7 +117,8 @@ export async function run(config) {
     cfg.labelColor,
     cfg.graphqlUrl,
     cfg.batchSize,
-    cfg.delayMs
+    cfg.delayMs,
+    cfg.excludeForks
   );
 
   core.info('');
@@ -145,10 +146,6 @@ export const generateBadgeMarkdown = (text, number, badgeColor, badgeLabelColor)
    GraphQL search helpers
    ------------------------- */
 
-/**
- * Generic GraphQL search for issues/PRs (returns issueCount)
- * Uses type ISSUE so it counts both issues and PRs where applicable.
- */
 export const getSearchCount = async (client, query) => {
   try {
     const res = await withBackoff(() =>
@@ -172,9 +169,6 @@ export const getSearchCount = async (client, query) => {
    REST helpers (fetch)
    ------------------------- */
 
-/**
- * REST fetch wrapper using global fetch (Node 18+ / 24)
- */
 const restFetch = async (url, token, opts = {}) => {
   const headers = Object.assign(
     {
@@ -221,7 +215,10 @@ export const getUserData = async (username, graphqlClient) => {
   }
 };
 
-export const getRepositories = async (username, graphqlClient) => {
+/**
+ * Fetch repositories for a user and optionally exclude forks
+ */
+export const getRepositories = async (username, graphqlClient, excludeForks = true) => {
   let endCursor = null;
   let hasNextPage = true;
   const repositories = [];
@@ -233,8 +230,14 @@ export const getRepositories = async (username, graphqlClient) => {
         query ($login: String!, $after: String) {
           user(login: $login) {
             repositories(first: 100, after: $after, affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER]) {
-              nodes { name }
-              pageInfo { endCursor hasNextPage }
+              nodes {
+                name
+                isFork
+              }
+              pageInfo {
+                endCursor
+                hasNextPage
+              }
             }
           }
         }`,
@@ -247,7 +250,8 @@ export const getRepositories = async (username, graphqlClient) => {
     }
 
     const repoNodes = response.user.repositories.nodes || [];
-    repositories.push(...repoNodes.map((r) => r.name));
+    const filtered = excludeForks ? repoNodes.filter((r) => !r.isFork) : repoNodes;
+    repositories.push(...filtered.map((r) => r.name));
 
     hasNextPage = response.user.repositories.pageInfo.hasNextPage;
     endCursor = response.user.repositories.pageInfo.endCursor;
@@ -260,47 +264,30 @@ export const getRepositories = async (username, graphqlClient) => {
    New metrics implementations
    ------------------------- */
 
-/**
- * Open PRs (current open PR count) across a repo
- */
 export const getOpenPRsForRepo = async (client, owner, repo) => {
   const q = `repo:${owner}/${repo} is:pr is:open`;
   return getSearchCount(client, q);
 };
 
-/**
- * Issues opened in last N days
- */
 export const getIssuesOpenedForRepo = async (client, owner, repo, sinceIso) => {
   const dateOnly = new Date(sinceIso).toISOString().split('T')[0];
   const q = `repo:${owner}/${repo} is:issue created:>=${dateOnly}`;
   return getSearchCount(client, q);
 };
 
-/**
- * Issues closed in last N days
- */
 export const getIssuesClosedForRepo = async (client, owner, repo, sinceIso) => {
   const dateOnly = new Date(sinceIso).toISOString().split('T')[0];
   const q = `repo:${owner}/${repo} is:issue closed:>=${dateOnly}`;
   return getSearchCount(client, q);
 };
 
-/**
- * Open issues (current)
- */
 export const getOpenIssuesForRepo = async (client, owner, repo) => {
   const q = `repo:${owner}/${repo} is:issue is:open`;
   return getSearchCount(client, q);
 };
 
-/**
- * Contributors total (REST) - paginates /repos/{owner}/{repo}/contributors
- * Note: requires repo read permission. This returns unique contributor count.
- */
 export const getContributorsTotalForRepo = async (token, owner, repo, perPage = 100) => {
   let page = 1;
-  let total = 0;
   const seen = new Set();
 
   while (true) {
@@ -309,15 +296,12 @@ export const getContributorsTotalForRepo = async (token, owner, repo, perPage = 
       const { json, response } = await withBackoff(() => restFetch(url, token));
       if (!Array.isArray(json) || json.length === 0) break;
       for (const c of json) {
-        // use login if available else fallback to name/email
         const id = c.login || `${c.name || ''}-${c.email || ''}`;
         seen.add(id);
       }
-      // check Link header for 'next'
       const link = response.headers.get('link') || '';
       if (!link.includes('rel="next"')) break;
       page++;
-      // small delay to avoid hammering
       await sleep(200);
     } catch (err) {
       core.error(`Failed to fetch contributors for ${owner}/${repo}: ${err.message}`);
@@ -327,15 +311,10 @@ export const getContributorsTotalForRepo = async (token, owner, repo, perPage = 
   return seen.size;
 };
 
-/**
- * Active contributors in last N days - approximate using commit search (REST) and collecting unique authors
- * To limit cost we cap the pages fetched.
- */
 export const getContributorsActiveForRepo = async (token, owner, repo, sinceIso, maxPages = 10) => {
   const dateOnly = new Date(sinceIso).toISOString().split('T')[0];
   const q = encodeURIComponent(`repo:${owner}/${repo} author-date:>=${dateOnly}`);
   const baseUrl = `https://api.github.com/search/commits?q=${q}&per_page=100`;
-  const headers = { Accept: 'application/vnd.github.cloak-preview' }; // commit search preview
   const seen = new Set();
   for (let page = 1; page <= maxPages; page++) {
     const url = `${baseUrl}&page=${page}`;
@@ -345,7 +324,6 @@ export const getContributorsActiveForRepo = async (token, owner, repo, sinceIso,
       );
       const items = json.items || [];
       for (const item of items) {
-        // item.author can be null for unknown authors; fallback to commit author email / name
         const authorLogin = item.author?.login;
         if (authorLogin) {
           seen.add(authorLogin);
@@ -355,10 +333,8 @@ export const getContributorsActiveForRepo = async (token, owner, repo, sinceIso,
         }
       }
       if (!json.items || json.items.length === 0) break;
-      // if total_count is small and we've seen them all, break early
       const totalCount = json.total_count || 0;
       if (seen.size >= totalCount) break;
-      // small delay between pages
       await sleep(300);
     } catch (err) {
       core.error(`Commit search failed for ${owner}/${repo} page ${page}: ${err.message}`);
@@ -368,9 +344,6 @@ export const getContributorsActiveForRepo = async (token, owner, repo, sinceIso,
   return seen.size;
 };
 
-/**
- * Commits in last N days (REST search commits)
- */
 export const getCommitsCountForRepo = async (token, owner, repo, sinceIso) => {
   const dateOnly = new Date(sinceIso).toISOString().split('T')[0];
   const q = encodeURIComponent(`repo:${owner}/${repo} committer-date:>=${dateOnly}`);
@@ -386,23 +359,15 @@ export const getCommitsCountForRepo = async (token, owner, repo, sinceIso) => {
   }
 };
 
-/**
- * Lines added / deleted (code_frequency) - returns { additions, deletions }
- * Uses REST /repos/{owner}/{repo}/stats/code_frequency
- * Note: may return 202 while GitHub computes - we retry with backoff.
- */
 export const getCodeFrequencyForRepo = async (token, owner, repo, daysWindow = 30) => {
   const url = `https://api.github.com/repos/${owner}/${repo}/stats/code_frequency`;
   try {
-    // code_frequency returns weekly arrays [weekUnix, additions, deletions]
-    const { json, response } = await withBackoff(() => restFetch(url, token));
-    // if GitHub returns 202 it would have been caught above as non-ok; restFetch throws for non-ok.
+    const { json } = await withBackoff(() => restFetch(url, token));
     if (!Array.isArray(json)) {
       core.debug(`Unexpected code_frequency response for ${owner}/${repo}: ${JSON.stringify(json)}`);
       return { additions: 0, deletions: 0 };
     }
 
-    // Sum the weeks that fall into the last daysWindow
     const cutoff = Date.now() - daysWindow * 24 * 60 * 60 * 1000;
     let additions = 0;
     let deletions = 0;
@@ -426,10 +391,6 @@ export const getCodeFrequencyForRepo = async (token, owner, repo, daysWindow = 3
    Batch processing utilities
    ------------------------- */
 
-/**
- * Processes per-repo metric function in batches with delays to respect rate limits
- * metricFn is async (owner, repo) => number or object
- */
 const processReposInBatches = async (repos, owner, token, client, metricFn, batchSize = DEFAULT_BATCH_SIZE, delayMs = DEFAULT_DELAY_MS) => {
   const results = {};
   for (let i = 0; i < repos.length; i += batchSize) {
@@ -449,8 +410,7 @@ const processReposInBatches = async (repos, owner, token, client, metricFn, batc
 };
 
 /* -------------------------
-   Metric adapter wrappers for processReposInBatches
-   Each adapter returns a number or an object depending on metric
+   Metric adapter wrappers
    ------------------------- */
 
 const adapterOpenPRs = async (owner, repo, token, client) => {
@@ -482,7 +442,8 @@ const adapterCommits = async (owner, repo, token, client, sinceIso) => {
 };
 
 const adapterCodeFreq = async (owner, repo, token, client, sinceIso) => {
-  return getCodeFrequencyForRepo(token, owner, repo, Math.ceil((Date.now() - new Date(sinceIso)) / (7 * 24 * 60 * 60 * 1000)));
+  const weeks = Math.ceil((Date.now() - new Date(sinceIso)) / (7 * 24 * 60 * 60 * 1000));
+  return getCodeFrequencyForRepo(token, owner, repo, Math.max(1, weeks));
 };
 
 /* -------------------------
@@ -498,7 +459,8 @@ export const generateBadges = async (
   badgeLabelColor,
   graphqlUrl = DEFAULT_GRAPHQL_URL,
   batchSize = DEFAULT_BATCH_SIZE,
-  delayMs = DEFAULT_DELAY_MS
+  delayMs = DEFAULT_DELAY_MS,
+  excludeForks = true
 ) => {
   const msgColor = badgeColor || DEFAULT_COLOR;
   const lblColor = badgeLabelColor || DEFAULT_LABEL_COLOR;
@@ -537,9 +499,9 @@ export const generateBadges = async (
       throw e;
     }
 
-    // repo list
-    const repos = await getRepositories(username, client);
-    core.info(`Fetched ${repos.length} repositories: ${repos.slice(0, 20).join(', ')}`);
+    // repo list (respect excludeForks)
+    const repos = await getRepositories(username, client, excludeForks);
+    core.info(`Fetched ${repos.length} repositories (excludeForks=${excludeForks}): ${repos.slice(0, 20).join(', ')}`);
     const repoCount = repos.length;
     core.info(`Total repositories: ${repoCount}`);
 
@@ -549,44 +511,75 @@ export const generateBadges = async (
     const prFilterDate = date.toISOString();
     core.debug(`Filtering metrics for last ${daysCount} days since ${prFilterDate}`);
 
-    // 1) Open PRs (aggregate)
-    const openPRsPerRepo = await processReposInBatches(repos, username, tokenParam, client, async (owner, repo) => {
-      return adapterOpenPRs(owner, repo, tokenParam, client);
-    }, batchSize, delayMs);
-
+    // 1) Open PRs
+    const openPRsPerRepo = await processReposInBatches(
+      repos,
+      username,
+      tokenParam,
+      client,
+      async (owner, repo) => adapterOpenPRs(owner, repo, tokenParam, client),
+      batchSize,
+      delayMs
+    );
     const totalOpenPRs = Object.values(openPRsPerRepo).reduce((s, v) => s + Number(v || 0), 0);
 
     // 2) Issues opened (last N days)
-    const issuesOpenedPerRepo = await processReposInBatches(repos, username, tokenParam, client, async (owner, repo) => {
-      return adapterIssuesOpened(owner, repo, tokenParam, client, prFilterDate);
-    }, batchSize, delayMs);
+    const issuesOpenedPerRepo = await processReposInBatches(
+      repos,
+      username,
+      tokenParam,
+      client,
+      async (owner, repo) => adapterIssuesOpened(owner, repo, tokenParam, client, prFilterDate),
+      batchSize,
+      delayMs
+    );
     const totalIssuesOpened = Object.values(issuesOpenedPerRepo).reduce((s, v) => s + Number(v || 0), 0);
 
     // 3) Issues closed (last N days)
-    const issuesClosedPerRepo = await processReposInBatches(repos, username, tokenParam, client, async (owner, repo) => {
-      return adapterIssuesClosed(owner, repo, tokenParam, client, prFilterDate);
-    }, batchSize, delayMs);
+    const issuesClosedPerRepo = await processReposInBatches(
+      repos,
+      username,
+      tokenParam,
+      client,
+      async (owner, repo) => adapterIssuesClosed(owner, repo, tokenParam, client, prFilterDate),
+      batchSize,
+      delayMs
+    );
     const totalIssuesClosed = Object.values(issuesClosedPerRepo).reduce((s, v) => s + Number(v || 0), 0);
 
     // 4) Open Issues (current)
-    const openIssuesPerRepo = await processReposInBatches(repos, username, tokenParam, client, async (owner, repo) => {
-      return adapterOpenIssues(owner, repo, tokenParam, client);
-    }, batchSize, delayMs);
+    const openIssuesPerRepo = await processReposInBatches(
+      repos,
+      username,
+      tokenParam,
+      client,
+      async (owner, repo) => adapterOpenIssues(owner, repo, tokenParam, client),
+      batchSize,
+      delayMs
+    );
     const totalOpenIssues = Object.values(openIssuesPerRepo).reduce((s, v) => s + Number(v || 0), 0);
 
-    // 5) Contributors (total and active in last N days)
-    const contributorsTotalPerRepo = await processReposInBatches(repos, username, tokenParam, client, async (owner, repo) => {
-      return adapterContributorsTotals(owner, repo, tokenParam);
-    }, batchSize, delayMs);
+    // 5) Contributors (total and active)
+    const contributorsTotalPerRepo = await processReposInBatches(
+      repos,
+      username,
+      tokenParam,
+      client,
+      async (owner, repo) => adapterContributorsTotals(owner, repo, tokenParam),
+      batchSize,
+      delayMs
+    );
 
-    const contributorsActivePerRepo = await processReposInBatches(repos, username, tokenParam, client, async (owner, repo) => {
-      return adapterContributorsActive(owner, repo, tokenParam, client, prFilterDate);
-    }, batchSize, delayMs);
+    const contributorsActivePerRepo = await processReposInBatches(
+      repos,
+      username,
+      tokenParam,
+      client,
+      async (owner, repo) => adapterContributorsActive(owner, repo, tokenParam, client, prFilterDate),
+      batchSize,
+      delayMs
+    );
 
-    const totalContributorsSet = new Set();
-    const totalActiveContributorsSet = new Set();
-    // contributorsTotalPerRepo gives counts per repo; for aggregate unique contributors you'd need to fetch and dedupe per-repo contributor lists.
-    // Here we approximate aggregate totals by summing per-repo unique contributor counts (may double-count across repos).
     let totalContributorsApprox = 0;
     for (const v of Object.values(contributorsTotalPerRepo)) {
       totalContributorsApprox += Number(v || 0);
@@ -597,15 +590,27 @@ export const generateBadges = async (
     }
 
     // 6) Commits in last N days
-    const commitsPerRepo = await processReposInBatches(repos, username, tokenParam, client, async (owner, repo) => {
-      return adapterCommits(owner, repo, tokenParam, client, prFilterDate);
-    }, batchSize, delayMs);
+    const commitsPerRepo = await processReposInBatches(
+      repos,
+      username,
+      tokenParam,
+      client,
+      async (owner, repo) => adapterCommits(owner, repo, tokenParam, client, prFilterDate),
+      batchSize,
+      delayMs
+    );
     const totalCommits = Object.values(commitsPerRepo).reduce((s, v) => s + Number(v || 0), 0);
 
-    // 7 & 8) Lines added & deleted in last N days (aggregate)
-    const codeFreqPerRepo = await processReposInBatches(repos, username, tokenParam, client, async (owner, repo) => {
-      return adapterCodeFreq(owner, repo, tokenParam, client, prFilterDate);
-    }, batchSize, delayMs);
+    // 7 & 8) Lines added & deleted
+    const codeFreqPerRepo = await processReposInBatches(
+      repos,
+      username,
+      tokenParam,
+      client,
+      async (owner, repo) => adapterCodeFreq(owner, repo, tokenParam, client, prFilterDate),
+      batchSize,
+      delayMs
+    );
 
     let totalAdditions = 0;
     let totalDeletions = 0;
@@ -615,7 +620,7 @@ export const generateBadges = async (
       totalDeletions += Number(val.deletions || 0);
     }
 
-    // Log some per-repo diagnostics for visibility
+    // Diagnostics
     core.info(`Total Open PRs: ${totalOpenPRs}`);
     core.info(`Total Issues opened in last ${daysCount} days: ${totalIssuesOpened}`);
     core.info(`Total Issues closed in last ${daysCount} days: ${totalIssuesClosed}`);
