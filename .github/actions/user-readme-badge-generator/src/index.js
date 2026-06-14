@@ -334,19 +334,19 @@ export const generateBadges = async (
   }
 
   try {
-    // Quick check: does user/org exist and what is the repository totalCount?
+    // Use the function-scoped `username` variable (not `cfg`)
     const lookup = await client(
       `query ($login: String!) {
          user(login: $login) { repositories(first:1) { totalCount } }
          organization(login: $login) { repositories(first:1) { totalCount } }
        }`,
-      { login: cfg ? cfg.username : username } // adapt depending on scope where you call it
+      { login: username }
     );
-    core.info(`Lookup for ${cfg ? cfg.username : username}: userRepoCount=${lookup.user?.repositories?.totalCount || 'NA'} organizationRepoCount=${lookup.organization?.repositories?.totalCount || 'NA'}`);
+    core.info(`Lookup for ${username}: userRepoCount=${lookup.user?.repositories?.totalCount || 'NA'} organizationRepoCount=${lookup.organization?.repositories?.totalCount || 'NA'}`);
   } catch (e) {
     core.error(`Lookup query failed: ${e.message}`);
   }
-  
+
   try {
     // repo count
     const repos = await getRepositories(username, client);
