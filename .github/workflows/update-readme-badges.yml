@@ -70,7 +70,7 @@ jobs:
           INPUT_BATCH_SIZE: '1'
           INPUT_DELAY_MS: '3000'
           INPUT_MAX_COMMIT_FALLBACK: '1000'           # cap per-repo processed commits in fallback
-          INPUT_COMMIT_FALLBACK_THRESHOLD: '50'       # only fallback when repo commit count <= this
+          INPUT_COMMIT_FALLBACK_THRESHOLD: '500'       # only fallback when repo commit count <= this
     
       - name: write to job summary
         run: |
