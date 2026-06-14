@@ -7,8 +7,8 @@ const DEFAULT_DAYS = 30;
 const DEFAULT_GRAPHQL_URL = 'https://api.github.com/graphql';
 const DEFAULT_COLOR = 'blue';
 const DEFAULT_LABEL_COLOR = '555';
-const DEFAULT_BATCH_SIZE = 1;
-const DEFAULT_DELAY_MS = 2000; // ms
+const DEFAULT_BATCH_SIZE = 5;
+const DEFAULT_DELAY_MS = 1000; // ms
 
 /* -------------------------
    Helpers
@@ -604,22 +604,88 @@ export const generateBadges = async (
     }
     const totalContributorsExact = uniqueContributors.size;
 
-    // Active contributors exact unique:
-    const contributorsActivePerRepo = await processReposInBatches(
-      repos,
-      username,
-      tokenParam,
-      client,
-      async (owner, repo) => adapterContributorsActiveList(owner, repo, tokenParam, client, filterDate),
-      batchSize,
-      delayMs
-    );
-    const uniqueActive = new Set();
-    for (const arr of Object.values(contributorsActivePerRepo)) {
-      if (!Array.isArray(arr)) continue;
-      for (const id of arr) if (id) uniqueActive.add(id);
+    // --- Replace per-repo active-contributors work with a chunked commit-search (fewer requests) ---
+    async function getRateLimit(token) {
+      try {
+        const { json } = await withBackoff(() => restFetch('https://api.github.com/rate_limit', token));
+        return json.rate?.core || json.rate || null;
+      } catch (err) {
+        core.debug(`rate_limit check failed: ${err.message}`);
+        return null;
+      }
     }
-    const totalActiveContributorsExact = uniqueActive.size;
+
+    async function chunkedActiveContributors(token, owner, repoList, sinceIso, chunkSize = 10, delay = 1500, maxPagesPerChunk = 5) {
+      const seen = new Set();
+      const dateOnlyLocal = new Date(sinceIso).toISOString().split('T')[0];
+
+      for (let i = 0; i < repoList.length; i += chunkSize) {
+        // rate-limit safety: check remaining and sleep until reset if low
+        const rl = await getRateLimit(token);
+        if (rl && typeof rl.remaining === 'number' && rl.remaining < 10) {
+          const waitUntil = (rl.reset * 1000) - Date.now();
+          const waitMs = Math.max(waitUntil, 5000);
+          core.info(`Low rate-limit remaining (${rl.remaining}), sleeping ${Math.ceil(waitMs/1000)}s until reset`);
+          await sleep(waitMs);
+        }
+
+        const chunk = repoList.slice(i, i + chunkSize);
+        const repoQuery = chunk.map((r) => `repo:${owner}/${r}`).join(' OR ');
+        const qBase = `${repoQuery} author-date:>=${dateOnlyLocal}`;
+        core.info(`Commit-search chunk ${Math.floor(i / chunkSize) + 1}/${Math.ceil(repoList.length / chunkSize)}: ${qBase}`);
+
+        // page through results for this chunk
+        for (let page = 1; page <= maxPagesPerChunk; page++) {
+          const url = `https://api.github.com/search/commits?q=${encodeURIComponent(qBase)}&per_page=100&page=${page}`;
+          try {
+            const { json } = await withBackoff(() => restFetch(url, token, { accept: 'application/vnd.github.cloak-preview' }));
+            const items = json.items || [];
+            for (const item of items) {
+              const login = item.author?.login;
+              if (login) seen.add(login);
+              else {
+                const email = item.commit?.author?.email || item.commit?.committer?.email;
+                if (email) seen.add(email);
+              }
+            }
+            // stop if fewer than a full page returned
+            if (!Array.isArray(items) || items.length < 100) break;
+            // optional small delay between pages to be conservative
+            await sleep(200);
+          } catch (err) {
+            core.error(`Chunk commit search failed for ${owner} chunk starting ${chunk[0]} page ${page}: ${err.message}`);
+            // if we get a rate-limit 403 here the withBackoff will have retried; break this chunk to avoid spinning
+            break;
+          }
+        }
+
+        // small pause between chunks to avoid burst
+        if (i + chunkSize < repoList.length) await sleep(delay);
+      }
+
+      return Array.from(seen);
+    }
+
+    // use the filtered 'repos' array (excludeForks=true)
+    const repoList = repos || [];
+
+    // chunk size and delay tuned for your runs; adjust if needed
+    const ACTIVE_CONTRIB_CHUNK_SIZE = 8;
+    const ACTIVE_CONTRIB_DELAY_MS = Math.max(1500, delayMs || 1500);
+    const ACTIVE_CONTRIB_MAX_PAGES = 5;
+
+    const activeContribs = await chunkedActiveContributors(
+      tokenParam,
+      username,
+      repoList,
+      filterDate,
+      ACTIVE_CONTRIB_CHUNK_SIZE,
+      ACTIVE_CONTRIB_DELAY_MS,
+      ACTIVE_CONTRIB_MAX_PAGES
+    );
+
+    const totalActiveContributorsExact = new Set(activeContribs).size;
+    core.info(`Active contributors (unique across repo chunks, last ${daysCount}d): ${totalActiveContributorsExact}`);
 
     // ------- Commits (preferred GraphQL) -------
     const commitsPerRepo = await processReposInBatches(
