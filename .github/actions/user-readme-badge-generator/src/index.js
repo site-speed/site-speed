@@ -366,8 +366,40 @@ export const getCommitsCountForRepo = async (token, owner, repo, sinceIso, clien
    Code frequency & commit stats fallback
    ------------------------- */
 
-// Per-commit aggregation fallback (accurate but heavy). Bounded by maxCommits.
-export const getCodeStatsFromCommits = async (token, owner, repo, daysWindow = 30, maxCommits = 1000) => {
+/**
+ * Per-commit aggregation fallback (accurate but heavy). Bounded by maxCommits.
+ * This version restricts commit listing to the repository's default branch by querying
+ * the default branch name via GraphQL and passing sha=<defaultBranch> to the commits list.
+ *
+ * Parameters:
+ *   token - repo token
+ *   owner, repo
+ *   daysWindow - integer days
+ *   maxCommits - cap on commits processed
+ *   client - GraphQL client (to fetch default branch)
+ */
+export const getCodeStatsFromCommits = async (token, owner, repo, daysWindow = 30, maxCommits = 1000, client = null) => {
+  // find default branch name (fallback to 'HEAD' if not available)
+  let defaultBranch = null;
+  if (client) {
+    try {
+      const gql = await withBackoff(() =>
+        client(
+          `query ($owner: String!, $name: String!) {
+             repository(owner: $owner, name: $name) {
+               defaultBranchRef { name }
+             }
+           }`,
+          { owner, name: repo }
+        )
+      );
+      defaultBranch = gql?.repository?.defaultBranchRef?.name || null;
+    } catch (err) {
+      core.debug(`Failed to fetch default branch for ${owner}/${repo}: ${err.message}`);
+    }
+  }
+  const shaParam = defaultBranch ? `&sha=${encodeURIComponent(defaultBranch)}` : '';
+
   const sinceIso = new Date(Date.now() - daysWindow * 24 * 60 * 60 * 1000).toISOString();
   const perPage = 100;
   let page = 1;
@@ -375,10 +407,10 @@ export const getCodeStatsFromCommits = async (token, owner, repo, daysWindow = 3
   let additions = 0;
   let deletions = 0;
 
-  core.info(`Per-commit aggregation for ${owner}/${repo} since ${sinceIso} (max ${maxCommits} commits)`);
+  core.info(`Per-commit aggregation for ${owner}/${repo} on ${defaultBranch || 'default branch'} since ${sinceIso} (max ${maxCommits} commits)`);
 
   outer: while (true) {
-    const url = `https://api.github.com/repos/${owner}/${repo}/commits?since=${encodeURIComponent(sinceIso)}&per_page=${perPage}&page=${page}`;
+    const url = `https://api.github.com/repos/${owner}/${repo}/commits?since=${encodeURIComponent(sinceIso)}${shaParam}&per_page=${perPage}&page=${page}`;
     let commitsPage;
     try {
       const { json } = await withBackoff(() => restFetch(url, token));
@@ -687,7 +719,6 @@ export const generateBadges = async (
 
     // ------- Lines added/deleted: use code_frequency, fallback to per-commit conditional -------
     const codeFreqPerRepo = {};
-    // Use config thresholds provided to this function or fallback to defaults
     const MAX_COMMIT_FALLBACK = maxCommitFallback || 1000;
     const COMMIT_FALLBACK_THRESHOLD = commitFallbackThreshold || 50;
 
@@ -713,7 +744,7 @@ export const generateBadges = async (
           continue;
         }
 
-        const fallback = await getCodeStatsFromCommits(tokenParam, username, repoName, daysCount, MAX_COMMIT_FALLBACK);
+        const fallback = await getCodeStatsFromCommits(tokenParam, username, repoName, daysCount, MAX_COMMIT_FALLBACK, client);
         codeFreqPerRepo[repoName] = fallback;
         core.info(`Per-commit fallback for ${repoName}: +${fallback.additions} / -${fallback.deletions} (commits=${repoCommitCount})`);
       } catch (err) {
@@ -731,7 +762,7 @@ export const generateBadges = async (
     }
 
     // Diagnostics
-    core.info(`Total repositories: ${repoCount}`);
+    core.info(`My Repositories: ${repoCount}`);
     core.info(`Total PRs created in last ${daysCount} days: ${totalPRsCreated}`);
     core.info(`Total PRs merged in last ${daysCount} days: ${totalPRsMerged}`);
     core.info(`Total Open PRs: ${totalOpenPRs}`);
@@ -746,7 +777,7 @@ export const generateBadges = async (
 
     // Build badges in requested order
     const badges = [
-      generateBadgeMarkdown(`My repositories`, repoCount, msgColor, lblColor),
+      generateBadgeMarkdown(`My Repositories`, repoCount, msgColor, lblColor),
       generateBadgeMarkdown(`PRs created in last ${daysCount} days`, totalPRsCreated, msgColor, lblColor),
       generateBadgeMarkdown(`Merged PRs in last ${daysCount} days`, totalPRsMerged, msgColor, lblColor),
       generateBadgeMarkdown(`Open PRs`, totalOpenPRs, msgColor, lblColor),
