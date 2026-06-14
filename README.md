@@ -15,6 +15,6 @@ Here are some ideas to get you started:
 - ⚡ Fun fact: ...
 -->
 
-<!-- start organization badges -->
+<!-- start user badges -->
 
-<!-- end organization badges -->
+<!-- end user badges -->
