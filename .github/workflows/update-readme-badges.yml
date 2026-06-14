@@ -37,10 +37,22 @@ jobs:
 
       - name: install & run user-readme-badge-generator
         id: user-readme-badge-generator
+        working-directory: ./.github/actions/user-readme-badge-generator
         run: |
-          cd .github/actions/user-readme-badge-generator
-          rm -rf node_modules package-lock.json
-          npm install --no-audit --no-fund --force
+          # prefer npm ci for reproducible installs when lockfile exists
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund
+          else
+            npm install --no-audit --no-fund
+          fi
+
+          echo "Installed packages:"
+          ls -la node_modules | sed -n '1,200p' || true
+
+          # verify the octokit import works (ESM dynamic import)
+          node -e "import('@octokit/graphql').then(()=>console.log('@octokit/graphql OK')).catch(e=>{console.error('IMPORT ERROR:', e.message); process.exit(1)})"
+
+          # run the action
           node src/index.js
         env:
           INPUT_USERNAME: ${{ github.repository_owner }}
