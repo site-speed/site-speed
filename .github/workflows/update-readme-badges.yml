@@ -77,36 +77,111 @@ jobs:
           echo "${{ steps.user-readme-badge-generator.outputs.badges }}" >> $GITHUB_STEP_SUMMARY
 
       - name: add to readme
+        id: add-to-readme
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
+          #!/bin/bash
+          set -euo pipefail
+
+          echo "Timestamp: start add-to-readme step at $(date -u +%FT%T%Z)"
+
           readme=README.md
-          
+
           # get SHA256 before
-          beforeHash=$(sha256sum $readme | awk '{ print $1 }')
-          
+          beforeHash=$(sha256sum "$readme" | awk '{ print $1 }' || echo "")
+          echo "Timestamp: beforeHash computed at $(date -u +%FT%T%Z) beforeHash=${beforeHash}"
+
           # Define start and end markers
           startMarker="<!-- start user badges -->"
           endMarker="<!-- end user badges -->"
-          
+
           replacement="${{ steps.user-readme-badge-generator.outputs.badges }}"
-          
-          # Escape special characters in the replacement text
+
+          # Escape special characters in the replacement text for safe perl substitution
           replacementEscaped=$(printf '%s\n' "$replacement" | perl -pe 's/([\\\/\$\(\)@])/\\$1/g')
-          
+
           # Use perl to replace the text between the markers
-          perl -i -pe "BEGIN{undef $/;} s/\Q$startMarker\E.*?\Q$endMarker\E/$startMarker\n$replacementEscaped\n$endMarker/smg" $readme
+          perl -i -pe "BEGIN{undef $/;} s/\Q$startMarker\E.*?\Q$endMarker\E/$startMarker\n$replacementEscaped\n$endMarker/smg" "$readme"
+
           # get SHA256 after
-          afterHash=$(sha256sum $readme | awk '{ print $1 }')
+          afterHash=$(sha256sum "$readme" | awk '{ print $1 }' || echo "")
+          echo "Timestamp: afterHash computed at $(date -u +%FT%T%Z) afterHash=${afterHash}"
+
           # Compare the hashes and commit if required
           if [ "$afterHash" = "$beforeHash" ]; then
-            echo "The hashes are equal - exiting script"
+            echo "The hashes are equal - no README changes. Exiting at $(date -u +%FT%T%Z)"
             exit 0
-          else
-            git config --global user.name 'github-actions[bot]'
-            git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-            git add $readme
-            git commit -m "docs: update readme badges"
-            git push
           fi
+
+          echo "README changed; preparing to commit at $(date -u +%FT%T%Z)"
+
+          # Configure git author
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          # Ensure remote uses token auth for push
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          # Stage and commit changes
+          git add "$readme"
+          git commit -m "docs: update readme badges"
+          echo "Committed changes at $(date -u +%FT%T%Z)"
+
+          # Determine branch to push: prefer GITHUB_REF branch if available, else current branch (or main)
+          if [ -n "${GITHUB_REF:-}" ] && [[ "${GITHUB_REF}" == refs/heads/* ]]; then
+            BRANCH="${GITHUB_REF#refs/heads/}"
+          else
+            BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+            if [ "${BRANCH}" = "HEAD" ]; then BRANCH="main"; fi
+          fi
+          echo "Branch to push: ${BRANCH}"
+
+          # Fetch remote branch shallowly
+          echo "Fetching origin/${BRANCH} at $(date -u +%FT%T%Z)..."
+          git fetch origin "${BRANCH}" --depth=1 || true
+
+          # If origin/BRANCH exists, attempt to rebase local commits onto it
+          if git rev-parse --verify "origin/${BRANCH}" >/dev/null 2>&1; then
+            echo "Attempting to rebase onto origin/${BRANCH} at $(date -u +%FT%T%Z)"
+            if git rebase "origin/${BRANCH}"; then
+              echo "Rebase successful at $(date -u +%FT%T%Z)"
+            else
+              echo "Rebase failed; aborting and creating fallback branch at $(date -u +%FT%T%Z)"
+              git rebase --abort || true
+              FALLBACK_BRANCH="update-readme-badges-$(date -u +%s)"
+              git checkout -b "${FALLBACK_BRANCH}"
+              git push -u origin "${FALLBACK_BRANCH}"
+              echo "Pushed fallback branch: ${FALLBACK_BRANCH} at $(date -u +%FT%T%Z)"
+              exit 0
+            fi
+          else
+            echo "origin/${BRANCH} does not exist; no rebase required"
+          fi
+
+          # Try normal push first
+          echo "Attempting git push origin ${BRANCH} at $(date -u +%FT%T%Z)"
+          if git push origin "${BRANCH}"; then
+            echo "Push succeeded at $(date -u +%FT%T%Z)"
+            exit 0
+          fi
+
+          # If push rejected, try safe force-with-lease
+          echo "Push rejected; attempting git push --force-with-lease origin ${BRANCH} at $(date -u +%FT%T%Z)"
+          if git push --force-with-lease origin "${BRANCH}"; then
+            echo "Force-with-lease push succeeded at $(date -u +%FT%T%Z)"
+            exit 0
+          fi
+
+          # Final fallback: create a unique branch and push it
+          FALLBACK_BRANCH="update-readme-badges-$(date -u +%s)"
+          git checkout -b "${FALLBACK_BRANCH}"
+          git push -u origin "${FALLBACK_BRANCH}"
+          echo "Push to ${BRANCH} failed; pushed changes to branch ${FALLBACK_BRANCH} at $(date -u +%FT%T%Z)"
+        shell: bash
+
+      
 
       - name: Test GraphQL token access
         run: |
