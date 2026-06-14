@@ -29,7 +29,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '24.x'
-          
+
+      - name: Confirm node & npm
+        run: |
+          node --version
+          npm --version
+
       - name: install & run user-readme-badge-generator
         id: user-readme-badge-generator
         run: |
