@@ -112,16 +112,15 @@ export const generateBadgeMarkdown = (text, number, badgeColor, badgeLabelColor)
 };
 
 /**
- * Attempts to fetch data for a user or organization
- * First tries as a user, then falls back to organization
+ * Fetches user data for a login (user-only).
+ * Throws if the login cannot be resolved as a user or the token lacks permission.
  */
-export const getUserOrOrgData = async (username, graphqlClient) => {
+export const getUserData = async (username, graphqlClient) => {
   try {
-    // Try querying as a user first
     const { user } = await graphqlClient(
       `
       query ($login: String!) {
-        user (login: $login) {
+        user(login: $login) {
           repositories(first: 1) {
             totalCount
           }
@@ -130,114 +129,37 @@ export const getUserOrOrgData = async (username, graphqlClient) => {
     `,
       { login: username }
     );
-    if (user) {
-      return { type: 'user', data: user };
-    }
-  } catch (err) {
-    core.debug(`User query failed: ${err.message}`);
-  }
 
-  try {
-    // Fall back to organization
-    const { organization } = await graphqlClient(
-      `
-      query ($login: String!) {
-        organization (login: $login) {
-          repositories(first: 1) {
-            totalCount
-          }
-        }
-      }
-    `,
-      { login: username }
-    );
-    if (organization) {
-      return { type: 'organization', data: organization };
+    if (!user) {
+      throw new Error(`Could not find a user with login: ${username}`);
     }
-  } catch (err) {
-    core.debug(`Organization query failed: ${err.message}`);
-  }
 
-  throw new Error(`Could not find user or organization with login: ${username}`);
+    return user;
+  } catch (err) {
+    // Bubble up with a clearer message
+    throw new Error(`User lookup failed for '${username}': ${err.message}`);
+  }
 };
 
 export const getRepositoryCount = async (username, graphqlClient) => {
-  const result = await getUserOrOrgData(username, graphqlClient);
-  return result.data.repositories.totalCount;
+  const user = await getUserData(username, graphqlClient);
+  return user.repositories.totalCount;
 };
 
 export const getRepositories = async (username, graphqlClient) => {
-  const result = await getUserOrOrgData(username, graphqlClient);
-  const accountType = result.type;
-  
-  let endCursor;
+  // Only support personal user account repositories
+  let endCursor = null;
   let hasNextPage = true;
   const repositories = [];
 
   while (hasNextPage) {
-    const query = accountType === 'user'
-      ? `
-        query ($login: String!, $after: String) {
-          user (login: $login) {
-            repositories(first: 100, after: $after, affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER]) {
-              nodes {
-                name
-              }
-              pageInfo {
-                endCursor
-                hasNextPage
-              }
-            }
-          }
-        }
+    const response = await graphqlClient(
       `
-      : `
-        query ($login: String!, $after: String) {
-          organization (login: $login) {
-            repositories(first: 100, after: $after) {
-              nodes {
-                name
-              }
-              pageInfo {
-                endCursor
-                hasNextPage
-              }
-            }
-          }
-        }
-      `;
-
-    const response = accountType === 'user'
-      ? await graphqlClient(query, { login: username, after: endCursor })
-      : await graphqlClient(query, { login: username, after: endCursor });
-
-    const accountData = accountType === 'user' ? response.user : response.organization;
-    repositories.push(...accountData.repositories.nodes.map(repo => repo.name));
-
-    hasNextPage = accountData.repositories.pageInfo.hasNextPage;
-    endCursor = accountData.repositories.pageInfo.endCursor;
-  }
-
-  return repositories;
-};
-
-
-export const getPullRequestsCount = async (username, repo, prFilterDate, graphqlClient) => {
-  let endCursor;
-  let hasNextPage = true;
-  let total = 0;
-  let merged = 0;
-
-  while (hasNextPage) {
-    const { repository } = await graphqlClient(
-      `
-      query ($owner: String!, $repo: String!, $after: String) {
-        repository(owner: $owner, name: $repo) {
-          pullRequests(first: 100, after: $after) {
+      query ($login: String!, $after: String) {
+        user (login: $login) {
+          repositories(first: 100, after: $after, affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER]) {
             nodes {
-              createdAt
-              mergedAt
-              state
+              name
             }
             pageInfo {
               endCursor
@@ -247,32 +169,67 @@ export const getPullRequestsCount = async (username, repo, prFilterDate, graphql
         }
       }
     `,
-      { owner: username, repo, after: endCursor }
+      { login: username, after: endCursor }
     );
 
-    const pullRequests = repository.pullRequests.nodes;
-    core.debug(`repo=${repo} pagePullRequests=${pullRequests.length}`);
+    if (!response || !response.user || !response.user.repositories) {
+      throw new Error(`Failed to fetch repositories for user '${username}'`);
+    }
 
-    // PRs created after the filter date
-    const openAfterFilter = pullRequests.filter(pr => new Date(pr.createdAt) >= new Date(prFilterDate));
-    core.debug(`repo=${repo} openAfterFilter=${openAfterFilter.length} (filterDate=${prFilterDate})`);
-    total += openAfterFilter.length;
+    const repoNodes = response.user.repositories.nodes || [];
+    repositories.push(...repoNodes.map(r => r.name));
 
-    // Merged PRs after the filter date (guard mergedAt)
-    const mergedPRs = pullRequests.filter(
-      pr => pr.state === 'MERGED' && pr.mergedAt && new Date(pr.mergedAt) >= new Date(prFilterDate)
-    );
-    core.debug(`repo=${repo} mergedAfterFilter=${mergedPRs.length}`);
-    merged += mergedPRs.length;
-
-    hasNextPage = repository.pullRequests.pageInfo.hasNextPage;
-    endCursor = repository.pullRequests.pageInfo.endCursor;
+    hasNextPage = response.user.repositories.pageInfo.hasNextPage;
+    endCursor = response.user.repositories.pageInfo.endCursor;
   }
 
-  return {
-    total,
-    merged
-  };
+  return repositories;
+};
+
+/**
+ * Uses the GraphQL search API to count PRs created/merged after a date.
+ * This avoids pagination and filters by using search qualifiers.
+ */
+export const getPullRequestsCount = async (username, repo, prFilterDate, graphqlClient) => {
+  // prFilterDate is an ISO string; convert to YYYY-MM-DD for GitHub search qualifiers
+  const dateOnly = new Date(prFilterDate).toISOString().split('T')[0];
+
+  // Query for PRs created after date
+  const createdQuery = `repo:${username}/${repo} is:pr created:>=${dateOnly}`;
+  const mergedQuery = `repo:${username}/${repo} is:pr is:merged merged:>=${dateOnly}`;
+
+  try {
+    const createdRes = await graphqlClient(
+      `query ($q: String!) {
+         search(query: $q, type: ISSUE, first: 1) {
+           issueCount
+         }
+       }`,
+      { q: createdQuery }
+    );
+
+    const mergedRes = await graphqlClient(
+      `query ($q: String!) {
+         search(query: $q, type: ISSUE, first: 1) {
+           issueCount
+         }
+       }`,
+      { q: mergedQuery }
+    );
+
+    const total = createdRes?.search?.issueCount || 0;
+    const merged = mergedRes?.search?.issueCount || 0;
+
+    core.debug(`repo=${repo} searchCreated='${createdQuery}' createdCount=${total}`);
+    core.debug(`repo=${repo} searchMerged='${mergedQuery}' mergedCount=${merged}`);
+
+    return { total, merged };
+  } catch (e) {
+    core.error(`getPullRequestsCount search query failed for ${username}/${repo}: ${e.message}`);
+    // If you prefer the action to fail loudly on search errors, rethrow here.
+    // For now return zeros so a single repo error won't abort the entire run.
+    return { total: 0, merged: 0 };
+  }
 };
 
 /**
@@ -295,8 +252,11 @@ export const processPullRequestsInBatches = async (username, repos, prFilterDate
     // Process each batch concurrently
     const results = await Promise.all(batch.map(repo => getPullRequestsCount(username, repo, prFilterDate, client)));
 
-    // Aggregate results from the batch
-    for (const { total, merged } of results) {
+    // Aggregate results from the batch, logging per-repo counts for diagnostics
+    for (let idx = 0; idx < batch.length; idx++) {
+      const repoName = batch[idx];
+      const { total, merged } = results[idx];
+      core.info(`Repo ${repoName}: created=${total}, merged=${merged}`);
       totalOpenPRs += total;
       totalMergedPRs += merged;
     }
@@ -325,34 +285,41 @@ export const generateBadges = async (
     client = createGraphqlClient(tokenParam, graphqlUrl);
   }
 
-  // Diagnostic: print who the GraphQL client authenticates as and confirm target account exists
   try {
-    const viewerResp = await client(`query { viewer { login } }`);
-    core.info(`GraphQL viewer login: ${viewerResp.viewer?.login || '(no viewer)'}`);
-  } catch (e) {
-    core.error(`Viewer query failed: ${e.message}`);
-  }
+    // Diagnostic: who does the token represent?
+    try {
+      const viewerResp = await client(`query { viewer { login } }`);
+      core.info(`GraphQL viewer login: ${viewerResp?.viewer?.login || '(no viewer)'}`);
+    } catch (e) {
+      core.error(`Viewer query failed: ${e.message}`);
+    }
 
-  try {
-    // Use the function-scoped `username` variable (not `cfg`)
-    const lookup = await client(
-      `query ($login: String!) {
-         user(login: $login) { repositories(first:1) { totalCount } }
-         organization(login: $login) { repositories(first:1) { totalCount } }
-       }`,
-      { login: username }
-    );
-    core.info(`Lookup for ${username}: userRepoCount=${lookup.user?.repositories?.totalCount || 'NA'} organizationRepoCount=${lookup.organization?.repositories?.totalCount || 'NA'}`);
-  } catch (e) {
-    core.error(`Lookup query failed: ${e.message}`);
-  }
+    // Ensure the target username resolves as a user and is accessible
+    try {
+      const userResp = await client(
+        `query ($login: String!) {
+           user(login: $login) { repositories(first:1) { totalCount } }
+         }`,
+        { login: username }
+      );
+      const userRepoCount = userResp?.user?.repositories?.totalCount ?? null;
+      core.info(`User lookup for ${username}: repoCount=${userRepoCount}`);
+      if (userRepoCount === null) {
+        core.error(`Unable to resolve '${username}' as a user or token lacks permission.`);
+        core.error('Provide a token that can read the user repositories (PAT or properly-installed app).');
+        throw new Error(`Insufficient token scope or installation to list '${username}' repositories — aborting.`);
+      }
+    } catch (e) {
+      core.error(`User lookup failed: ${e.message}`);
+      throw e;
+    }
 
-  try {
     // repo count
     const repos = await getRepositories(username, client);
-    core.debug(`Fetched ${repos.length} repositories: ${repos.slice(0,20).join(', ')}`);
+    core.debug(`Fetched ${repos.length} repositories: ${repos.slice(0, 20).join(', ')}`);
     const repoCount = repos.length;
     core.info(`Total repositories: ${repoCount}`);
+
     // pull requests
     const date = new Date();
     date.setUTCDate(date.getUTCDate() - daysCount);
@@ -373,6 +340,7 @@ export const generateBadges = async (
     return badges;
   } catch (error) {
     core.error(error.stack);
+    // Fail loudly so users can act on permission issues
     process.exit(1);
   }
 };
