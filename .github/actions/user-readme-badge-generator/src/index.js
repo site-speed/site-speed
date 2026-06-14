@@ -264,6 +264,7 @@ export const getRepositories = async (username, graphqlClient, excludeForks = tr
    New metrics implementations
    ------------------------- */
 
+/* PRs (created / merged) using GraphQL search */
 export const getPRsCreatedForRepo = async (client, owner, repo, sinceIso) => {
   const dateOnly = new Date(sinceIso).toISOString().split('T')[0];
   const q = `repo:${owner}/${repo} is:pr created:>=${dateOnly}`;
@@ -281,6 +282,7 @@ export const getOpenPRsForRepo = async (client, owner, repo) => {
   return getSearchCount(client, q);
 };
 
+/* Issues (opened/closed) */
 export const getIssuesOpenedForRepo = async (client, owner, repo, sinceIso) => {
   const dateOnly = new Date(sinceIso).toISOString().split('T')[0];
   const q = `repo:${owner}/${repo} is:issue created:>=${dateOnly}`;
@@ -298,50 +300,65 @@ export const getOpenIssuesForRepo = async (client, owner, repo) => {
   return getSearchCount(client, q);
 };
 
-export const getContributorsTotalForRepo = async (token, owner, repo, perPage = 100) => {
-  let page = 1;
-  const seen = new Set();
+/* Contributors: exact unique contributors across all repos */
 
-  while (true) {
-    const url = `https://api.github.com/repos/${owner}/${repo}/contributors?per_page=${perPage}&page=${page}&anon=true`;
-    try {
+/**
+ * Fetch contributors list for a single repo (returns array of identifiers)
+ * Uses /repos/{owner}/{repo}/contributors?anon=true
+ * Each contributor: use login if present, otherwise fallback to name/email id
+ */
+export const getContributorsListForRepo = async (token, owner, repo, perPage = 100) => {
+  let page = 1;
+  const contributors = [];
+  try {
+    while (true) {
+      const url = `https://api.github.com/repos/${owner}/${repo}/contributors?per_page=${perPage}&page=${page}&anon=true`;
       const { json, response } = await withBackoff(() => restFetch(url, token));
       if (!Array.isArray(json) || json.length === 0) break;
       for (const c of json) {
         const id = c.login || `${c.name || ''}-${c.email || ''}`;
-        seen.add(id);
+        contributors.push(id);
       }
       const link = response.headers.get('link') || '';
       if (!link.includes('rel="next"')) break;
       page++;
+      // small delay between pages
       await sleep(200);
-    } catch (err) {
-      core.error(`Failed to fetch contributors for ${owner}/${repo}: ${err.message}`);
-      break;
     }
+  } catch (err) {
+    core.error(`Failed to fetch contributors list for ${owner}/${repo}: ${err.message}`);
   }
-  return seen.size;
+  return contributors;
 };
 
-export const getContributorsActiveForRepo = async (token, owner, repo, sinceIso, maxPages = 10) => {
+/**
+ * Active contributors for a repo (returns array of identifiers) using commit search
+ * This returns author logins/emails from commit search (pages limited)
+ */
+export const getContributorsActiveListForRepo = async (token, owner, repo, sinceIso, maxPages = 10) => {
   const dateOnly = new Date(sinceIso).toISOString().split('T')[0];
   const q = encodeURIComponent(`repo:${owner}/${repo} author-date:>=${dateOnly}`);
   const baseUrl = `https://api.github.com/search/commits?q=${q}&per_page=100`;
+  const list = [];
   const seen = new Set();
   for (let page = 1; page <= maxPages; page++) {
     const url = `${baseUrl}&page=${page}`;
     try {
-      const { json } = await withBackoff(() =>
-        restFetch(url, token, { accept: 'application/vnd.github.cloak-preview' })
-      );
+      const { json } = await withBackoff(() => restFetch(url, token, { accept: 'application/vnd.github.cloak-preview' }));
       const items = json.items || [];
       for (const item of items) {
         const authorLogin = item.author?.login;
         if (authorLogin) {
-          seen.add(authorLogin);
+          if (!seen.has(authorLogin)) {
+            seen.add(authorLogin);
+            list.push(authorLogin);
+          }
         } else {
           const email = item.commit?.author?.email || item.commit?.committer?.email;
-          if (email) seen.add(email);
+          if (email && !seen.has(email)) {
+            seen.add(email);
+            list.push(email);
+          }
         }
       }
       if (!json.items || json.items.length === 0) break;
@@ -353,17 +370,16 @@ export const getContributorsActiveForRepo = async (token, owner, repo, sinceIso,
       break;
     }
   }
-  return seen.size;
+  return list;
 };
 
+/* Commits (count) using commit search (REST) */
 export const getCommitsCountForRepo = async (token, owner, repo, sinceIso) => {
   const dateOnly = new Date(sinceIso).toISOString().split('T')[0];
   const q = encodeURIComponent(`repo:${owner}/${repo} committer-date:>=${dateOnly}`);
   const url = `https://api.github.com/search/commits?q=${q}&per_page=1`;
   try {
-    const { json } = await withBackoff(() =>
-      restFetch(url, token, { accept: 'application/vnd.github.cloak-preview' })
-    );
+    const { json } = await withBackoff(() => restFetch(url, token, { accept: 'application/vnd.github.cloak-preview' }));
     return json.total_count || 0;
   } catch (err) {
     core.error(`Commit count search failed for ${owner}/${repo}: ${err.message}`);
@@ -371,6 +387,7 @@ export const getCommitsCountForRepo = async (token, owner, repo, sinceIso) => {
   }
 };
 
+/* Lines added/deleted using code_frequency */
 export const getCodeFrequencyForRepo = async (token, owner, repo, daysWindow = 30) => {
   const url = `https://api.github.com/repos/${owner}/${repo}/stats/code_frequency`;
   try {
@@ -449,12 +466,12 @@ const adapterOpenIssues = async (owner, repo, token, client) => {
   return getOpenIssuesForRepo(client, owner, repo);
 };
 
-const adapterContributorsTotals = async (owner, repo, token) => {
-  return getContributorsTotalForRepo(token, owner, repo);
+const adapterContributorsList = async (owner, repo, token) => {
+  return getContributorsListForRepo(token, owner, repo);
 };
 
-const adapterContributorsActive = async (owner, repo, token, client, sinceIso) => {
-  return getContributorsActiveForRepo(token, owner, repo, sinceIso);
+const adapterContributorsActiveList = async (owner, repo, token, client, sinceIso) => {
+  return getContributorsActiveListForRepo(token, owner, repo, sinceIso);
 };
 
 const adapterCommits = async (owner, repo, token, client, sinceIso) => {
@@ -607,35 +624,46 @@ export const generateBadges = async (
     );
     const totalOpenIssues = Object.values(openIssuesPerRepo).reduce((s, v) => s + Number(v || 0), 0);
 
-    // 5) Contributors (total and active)
-    const contributorsTotalPerRepo = await processReposInBatches(
+    // 5) Contributors (exact unique across repos)
+    // Fetch per-repo contributor lists (array of identifiers) and dedupe across repos
+    const contributorsListPerRepo = await processReposInBatches(
       repos,
       username,
       tokenParam,
       client,
-      async (owner, repo) => adapterContributorsTotals(owner, repo, tokenParam),
+      async (owner, repo) => adapterContributorsList(owner, repo, tokenParam),
       batchSize,
       delayMs
     );
 
+    const uniqueContributors = new Set();
+    for (const arr of Object.values(contributorsListPerRepo)) {
+      if (!Array.isArray(arr)) continue;
+      for (const id of arr) {
+        if (id) uniqueContributors.add(id);
+      }
+    }
+    const totalContributorsExact = uniqueContributors.size;
+
+    // Active contributors: fetch per-repo active contributor lists (from commits) and dedupe across repos
     const contributorsActivePerRepo = await processReposInBatches(
       repos,
       username,
       tokenParam,
       client,
-      async (owner, repo) => adapterContributorsActive(owner, repo, tokenParam, client, filterDate),
+      async (owner, repo) => adapterContributorsActiveList(owner, repo, tokenParam, client, filterDate),
       batchSize,
       delayMs
     );
 
-    let totalContributorsApprox = 0;
-    for (const v of Object.values(contributorsTotalPerRepo)) {
-      totalContributorsApprox += Number(v || 0);
+    const uniqueActive = new Set();
+    for (const arr of Object.values(contributorsActivePerRepo)) {
+      if (!Array.isArray(arr)) continue;
+      for (const id of arr) {
+        if (id) uniqueActive.add(id);
+      }
     }
-    let totalActiveContributorsApprox = 0;
-    for (const v of Object.values(contributorsActivePerRepo)) {
-      totalActiveContributorsApprox += Number(v || 0);
-    }
+    const totalActiveContributorsExact = uniqueActive.size;
 
     // 6) Commits in last N days
     const commitsPerRepo = await processReposInBatches(
@@ -676,10 +704,11 @@ export const generateBadges = async (
     core.info(`Total Issues opened in last ${daysCount} days: ${totalIssuesOpened}`);
     core.info(`Total Issues closed in last ${daysCount} days: ${totalIssuesClosed}`);
     core.info(`Total Open Issues: ${totalOpenIssues}`);
-    core.info(`Contributors (approx sum per-repo): total=${totalContributorsApprox}, active(last ${daysCount}d)=${totalActiveContributorsApprox}`);
+    core.info(`Contributors (unique across repos): total=${totalContributorsExact}`);
+    core.info(`Active contributors (unique across repos, last ${daysCount}d): ${totalActiveContributorsExact}`);
     core.info(`Total commits in last ${daysCount} days: ${totalCommits}`);
-    core.info(`Total lines added in last ${daysCount} days (approx): ${totalAdditions}`);
-    core.info(`Total lines deleted in last ${daysCount} days (approx): ${totalDeletions}`);
+    core.info(`Total lines added in last ${daysCount} days: ${totalAdditions}`);
+    core.info(`Total lines deleted in last ${daysCount} days: ${totalDeletions}`);
 
     // Build badges in requested order:
     const badges = [
@@ -690,8 +719,8 @@ export const generateBadges = async (
       generateBadgeMarkdown(`Issues opened in last ${daysCount} days`, totalIssuesOpened, msgColor, lblColor),
       generateBadgeMarkdown(`Issues closed in last ${daysCount} days`, totalIssuesClosed, msgColor, lblColor),
       generateBadgeMarkdown(`Open issues`, totalOpenIssues, msgColor, lblColor),
-      generateBadgeMarkdown(`Contributors (approx total)`, totalContributorsApprox, msgColor, lblColor),
-      generateBadgeMarkdown(`Active contributors (last ${daysCount}d)`, totalActiveContributorsApprox, msgColor, lblColor),
+      generateBadgeMarkdown(`Contributors (unique)`, totalContributorsExact, msgColor, lblColor),
+      generateBadgeMarkdown(`Active contributors (last ${daysCount}d)`, totalActiveContributorsExact, msgColor, lblColor),
       generateBadgeMarkdown(`Commits in last ${daysCount} days`, totalCommits, msgColor, lblColor),
       generateBadgeMarkdown(`Lines added (last ${daysCount} days)`, totalAdditions, msgColor, lblColor),
       generateBadgeMarkdown(`Lines deleted (last ${daysCount} days)`, totalDeletions, msgColor, lblColor)
