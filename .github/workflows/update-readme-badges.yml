@@ -39,7 +39,8 @@ jobs:
         id: user-readme-badge-generator
         run: |
           cd .github/actions/user-readme-badge-generator
-          npm install --no-audit --no-fund
+          rm -rf node_modules package-lock.json
+          npm install --no-audit --no-fund --force
           node src/index.js
         env:
           INPUT_USERNAME: ${{ github.repository_owner }}
