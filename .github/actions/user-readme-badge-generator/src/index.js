@@ -725,7 +725,7 @@ export const generateBadges = async (
     for (const repoName of repos) {
       try {
         const freq = await getCodeFrequencyForRepo(tokenParam, username, repoName, daysCount);
-        if (freq && (freq.additions !== 0 || freq.deletions !== 0)) {
+        if (freq !== null) {
           codeFreqPerRepo[repoName] = freq;
           core.debug(`code_frequency for ${repoName}: +${freq.additions} / -${freq.deletions}`);
           continue;
