@@ -264,6 +264,18 @@ export const getRepositories = async (username, graphqlClient, excludeForks = tr
    New metrics implementations
    ------------------------- */
 
+export const getPRsCreatedForRepo = async (client, owner, repo, sinceIso) => {
+  const dateOnly = new Date(sinceIso).toISOString().split('T')[0];
+  const q = `repo:${owner}/${repo} is:pr created:>=${dateOnly}`;
+  return getSearchCount(client, q);
+};
+
+export const getPRsMergedForRepo = async (client, owner, repo, sinceIso) => {
+  const dateOnly = new Date(sinceIso).toISOString().split('T')[0];
+  const q = `repo:${owner}/${repo} is:pr is:merged merged:>=${dateOnly}`;
+  return getSearchCount(client, q);
+};
+
 export const getOpenPRsForRepo = async (client, owner, repo) => {
   const q = `repo:${owner}/${repo} is:pr is:open`;
   return getSearchCount(client, q);
@@ -413,6 +425,14 @@ const processReposInBatches = async (repos, owner, token, client, metricFn, batc
    Metric adapter wrappers
    ------------------------- */
 
+const adapterPRsCreated = async (owner, repo, token, client, sinceIso) => {
+  return getPRsCreatedForRepo(client, owner, repo, sinceIso);
+};
+
+const adapterPRsMerged = async (owner, repo, token, client, sinceIso) => {
+  return getPRsMergedForRepo(client, owner, repo, sinceIso);
+};
+
 const adapterOpenPRs = async (owner, repo, token, client) => {
   return getOpenPRsForRepo(client, owner, repo);
 };
@@ -508,8 +528,36 @@ export const generateBadges = async (
     // date window
     const date = new Date();
     date.setUTCDate(date.getUTCDate() - daysCount);
-    const prFilterDate = date.toISOString();
-    core.debug(`Filtering metrics for last ${daysCount} days since ${prFilterDate}`);
+    const filterDate = date.toISOString();
+    core.debug(`Filtering metrics for last ${daysCount} days since ${filterDate}`);
+
+    // --- ORIGINAL METRICS: Total repos, PRs created, Merged PRs (first) ---
+
+    // PRs created in last N days
+    const prCreatedPerRepo = await processReposInBatches(
+      repos,
+      username,
+      tokenParam,
+      client,
+      async (owner, repo) => adapterPRsCreated(owner, repo, tokenParam, client, filterDate),
+      batchSize,
+      delayMs
+    );
+    const totalPRsCreated = Object.values(prCreatedPerRepo).reduce((s, v) => s + Number(v || 0), 0);
+
+    // PRs merged in last N days
+    const prMergedPerRepo = await processReposInBatches(
+      repos,
+      username,
+      tokenParam,
+      client,
+      async (owner, repo) => adapterPRsMerged(owner, repo, tokenParam, client, filterDate),
+      batchSize,
+      delayMs
+    );
+    const totalPRsMerged = Object.values(prMergedPerRepo).reduce((s, v) => s + Number(v || 0), 0);
+
+    // --- OTHER METRICS ---
 
     // 1) Open PRs
     const openPRsPerRepo = await processReposInBatches(
@@ -529,7 +577,7 @@ export const generateBadges = async (
       username,
       tokenParam,
       client,
-      async (owner, repo) => adapterIssuesOpened(owner, repo, tokenParam, client, prFilterDate),
+      async (owner, repo) => adapterIssuesOpened(owner, repo, tokenParam, client, filterDate),
       batchSize,
       delayMs
     );
@@ -541,7 +589,7 @@ export const generateBadges = async (
       username,
       tokenParam,
       client,
-      async (owner, repo) => adapterIssuesClosed(owner, repo, tokenParam, client, prFilterDate),
+      async (owner, repo) => adapterIssuesClosed(owner, repo, tokenParam, client, filterDate),
       batchSize,
       delayMs
     );
@@ -575,7 +623,7 @@ export const generateBadges = async (
       username,
       tokenParam,
       client,
-      async (owner, repo) => adapterContributorsActive(owner, repo, tokenParam, client, prFilterDate),
+      async (owner, repo) => adapterContributorsActive(owner, repo, tokenParam, client, filterDate),
       batchSize,
       delayMs
     );
@@ -595,7 +643,7 @@ export const generateBadges = async (
       username,
       tokenParam,
       client,
-      async (owner, repo) => adapterCommits(owner, repo, tokenParam, client, prFilterDate),
+      async (owner, repo) => adapterCommits(owner, repo, tokenParam, client, filterDate),
       batchSize,
       delayMs
     );
@@ -607,7 +655,7 @@ export const generateBadges = async (
       username,
       tokenParam,
       client,
-      async (owner, repo) => adapterCodeFreq(owner, repo, tokenParam, client, prFilterDate),
+      async (owner, repo) => adapterCodeFreq(owner, repo, tokenParam, client, filterDate),
       batchSize,
       delayMs
     );
@@ -621,6 +669,9 @@ export const generateBadges = async (
     }
 
     // Diagnostics
+    core.info(`Total repositories: ${repoCount}`);
+    core.info(`Total PRs created in last ${daysCount} days: ${totalPRsCreated}`);
+    core.info(`Total PRs merged in last ${daysCount} days: ${totalPRsMerged}`);
     core.info(`Total Open PRs: ${totalOpenPRs}`);
     core.info(`Total Issues opened in last ${daysCount} days: ${totalIssuesOpened}`);
     core.info(`Total Issues closed in last ${daysCount} days: ${totalIssuesClosed}`);
@@ -632,6 +683,9 @@ export const generateBadges = async (
 
     // Build badges in requested order:
     const badges = [
+      generateBadgeMarkdown(`Total repositories`, repoCount, msgColor, lblColor),
+      generateBadgeMarkdown(`PRs created in last ${daysCount} days`, totalPRsCreated, msgColor, lblColor),
+      generateBadgeMarkdown(`Merged PRs in last ${daysCount} days`, totalPRsMerged, msgColor, lblColor),
       generateBadgeMarkdown(`Open PRs`, totalOpenPRs, msgColor, lblColor),
       generateBadgeMarkdown(`Issues opened in last ${daysCount} days`, totalIssuesOpened, msgColor, lblColor),
       generateBadgeMarkdown(`Issues closed in last ${daysCount} days`, totalIssuesClosed, msgColor, lblColor),
