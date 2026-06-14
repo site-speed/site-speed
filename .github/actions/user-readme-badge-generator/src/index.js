@@ -755,28 +755,72 @@ export const generateBadges = async (
     }
     const totalActiveContributorsExact = uniqueActive.size;
 
-    // 6) Commits in last N days
-    const commitsPerRepo = await processReposInBatches(
-      repos,
-      username,
-      tokenParam,
-      client,
-      async (owner, repo) => adapterCommits(owner, repo, tokenParam, client, filterDate),
-      batchSize,
-      delayMs
-    );
-    const totalCommits = Object.values(commitsPerRepo).reduce((s, v) => s + Number(v || 0), 0);
+// CONFIG: max commits to allow per-commit fallback (tunable via input)
+const MAX_COMMIT_FALLBACK = Number(core.getInput('max_commit_fallback') || 1000); // overall cap per-repo
+const COMMIT_FALLBACK_THRESHOLD = Number(core.getInput('commit_fallback_threshold') || 50); // per-repo commits <= this will allow fallback
 
-    // 7 & 8) Lines added & deleted
-    const codeFreqPerRepo = await processReposInBatches(
-      repos,
-      username,
-      tokenParam,
-      client,
-      async (owner, repo) => adapterCodeFreq(owner, repo, tokenParam, client, filterDate),
-      batchSize,
-      delayMs
-    );
+// --- 6) Commits in last N days (cheap search) ---
+// compute commitsPerRepo first (so we can decide whether to run heavy fallback)
+const commitsPerRepo = await processReposInBatches(
+  repos,
+  username,
+  tokenParam,
+  client,
+  async (owner, repo) => adapterCommits(owner, repo, tokenParam, client, filterDate),
+  batchSize,
+  delayMs
+);
+const totalCommits = Object.values(commitsPerRepo).reduce((s, v) => s + Number(v || 0), 0);
+
+// 7 & 8) Lines added & deleted: try code_frequency for each repo, but only fallback to per-commit when commit count > 0 and below threshold
+const codeFreqPerRepo = {};
+for (const repoName of repos) {
+  try {
+    // attempt code_frequency
+    const freq = await getCodeFrequencyForRepo(tokenParam, username, repoName, daysCount);
+    // getCodeFrequencyForRepo now may return { additions, deletions } or fall back itself.
+    // But to avoid per-repo double work, if it returned zeros and code_frequency was unavailable,
+    // rely on commit counts to decide explicit fallback.
+    if (freq && (freq.additions || freq.deletions)) {
+      codeFreqPerRepo[repoName] = freq;
+      core.debug(`code_frequency for ${repoName}: +${freq.additions} / -${freq.deletions}`);
+      continue;
+    }
+
+    // if freq shows zeros, consult commitsPerRepo to decide fallback
+    const repoCommitCount = Number(commitsPerRepo[repoName] || 0);
+    if (repoCommitCount === 0) {
+      // nothing to do; skip heavy per-commit aggregation
+      codeFreqPerRepo[repoName] = { additions: 0, deletions: 0 };
+      core.debug(`Skipping per-commit fallback for ${repoName} (0 commits in window).`);
+      continue;
+    }
+
+    // If commits are small enough, do fallback; otherwise skip to avoid heavy work
+    if (repoCommitCount > COMMIT_FALLBACK_THRESHOLD || repoCommitCount > MAX_COMMIT_FALLBACK) {
+      core.info(`Skipping per-commit fallback for ${repoName} due to high commit count (${repoCommitCount}). Set INPUT_COMMIT_FALLBACK_THRESHOLD or INPUT_MAX_COMMIT_FALLBACK if you want to enable.`);
+      codeFreqPerRepo[repoName] = { additions: 0, deletions: 0 };
+      continue;
+    }
+
+    // Do per-commit fallback (bounded by MAX_COMMIT_FALLBACK inside helper)
+    const fallback = await getCodeStatsFromCommits(tokenParam, username, repoName, daysCount, MAX_COMMIT_FALLBACK);
+    codeFreqPerRepo[repoName] = fallback;
+    core.info(`Per-commit fallback for ${repoName}: +${fallback.additions} / -${fallback.deletions} (commits=${repoCommitCount})`);
+  } catch (err) {
+    core.error(`Code frequency processing failed for ${username}/${repoName}: ${err.message}`);
+    codeFreqPerRepo[repoName] = { additions: 0, deletions: 0 };
+  }
+}
+
+// Aggregate totals
+let totalAdditions = 0;
+let totalDeletions = 0;
+for (const val of Object.values(codeFreqPerRepo)) {
+  if (!val) continue;
+  totalAdditions += Number(val.additions || 0);
+  totalDeletions += Number(val.deletions || 0);
+}
 
     let totalAdditions = 0;
     let totalDeletions = 0;
