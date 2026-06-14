@@ -1,3 +1,4 @@
+/* eslint-disable no-await-in-loop */
 import * as core from '@actions/core';
 import { graphql } from '@octokit/graphql';
 
@@ -29,7 +30,7 @@ async function withBackoff(fn, { retries = 4, baseDelay = 500 } = {}) {
       attempt++;
       if (attempt > retries) throw err;
       const delay = baseDelay * Math.pow(2, attempt - 1);
-      core.info(`Transient error: ${err.message}. Retrying in ${delay}ms (attempt ${attempt}/${retries})`);
+      core.debug(`Transient error: ${err.message}. Retrying in ${delay}ms (attempt ${attempt}/${retries})`);
       await sleep(delay);
     }
   }
@@ -339,12 +340,12 @@ export const getCommitsCountForRepo = async (token, owner, repo, sinceIso, clien
       );
       const count = gqlRes?.repository?.defaultBranchRef?.target?.history?.totalCount;
       if (typeof count === 'number') {
-        core.info(`GraphQL commit history for ${owner}/${repo} since ${sinceIso}: ${count}`);
+        core.debug(`GraphQL commit history for ${owner}/${repo} since ${sinceIso}: ${count}`);
         return count;
       }
-      core.info(`GraphQL commit totalCount not available for ${owner}/${repo}; falling back to REST search`);
+      core.debug(`GraphQL commit totalCount not available for ${owner}/${repo}; falling back to REST search`);
     } catch (err) {
-      core.info(`GraphQL commit count failed for ${owner}/${repo}: ${err.message}`);
+      core.debug(`GraphQL commit count failed for ${owner}/${repo}: ${err.message}`);
       // fall through to REST fallback
     }
   }
@@ -395,7 +396,7 @@ export const getCodeStatsFromCommits = async (token, owner, repo, daysWindow = 3
       );
       defaultBranch = gql?.repository?.defaultBranchRef?.name || null;
     } catch (err) {
-      core.info(`Failed to fetch default branch for ${owner}/${repo}: ${err.message}`);
+      core.debug(`Failed to fetch default branch for ${owner}/${repo}: ${err.message}`);
     }
   }
   const shaParam = defaultBranch ? `&sha=${encodeURIComponent(defaultBranch)}` : '';
@@ -424,7 +425,7 @@ export const getCodeStatsFromCommits = async (token, owner, repo, daysWindow = 3
 
     for (const c of commitsPage) {
       if (processed >= maxCommits) {
-        core.info(`Reached maxCommits (${maxCommits}) for ${owner}/${repo}; stopping per-commit aggregation`);
+        core.warn(`Reached maxCommits (${maxCommits}) for ${owner}/${repo}; stopping per-commit aggregation`);
         break outer;
       }
       const sha = c.sha;
@@ -435,7 +436,7 @@ export const getCodeStatsFromCommits = async (token, owner, repo, daysWindow = 3
         additions += Number(stats.additions || 0);
         deletions += Number(stats.deletions || 0);
       } catch (err) {
-        core.info(`Failed to fetch commit ${sha} for ${owner}/${repo}: ${err.message}`);
+        core.debug(`Failed to fetch commit ${sha} for ${owner}/${repo}: ${err.message}`);
       }
       processed++;
       await sleep(50);
@@ -535,98 +536,56 @@ export const generateBadges = async (
       core.error(`User lookup failed: ${e.message}`);
       throw e;
     }
-    core.info(`Timestamp: user lookup at ${new Date().toISOString()}`);
-     
+
     // Repositories (filtered)
     const repos = await getRepositories(username, client, excludeForks);
+    core.info(`Timestamp: repos fetched at ${new Date().toISOString()}`);
     core.info(`Fetched ${repos.length} repositories (excludeForks=${excludeForks}): ${repos.slice(0, 20).join(', ')}`);
     const repoCount = repos.length;
-    core.info(`Timestamp: repos fetched at ${new Date().toISOString()}`);
 
     // date window
     const date = new Date();
     date.setUTCDate(date.getUTCDate() - daysCount);
     const filterDate = date.toISOString();
-    core.info(`Filtering metrics for last ${daysCount} days since ${filterDate}`);
+    core.debug(`Filtering metrics for last ${daysCount} days since ${filterDate}`);
+    const dateOnly = filterDate.split('T')[0];
 
-    // --- ORIGINAL metrics first ---
-    // PRs created
-    const prCreatedPerRepo = await processReposInBatches(
-      repos,
-      username,
-      tokenParam,
-      client,
-      async (owner, repo) => adapterPRsCreated(owner, repo, tokenParam, client, filterDate),
-      batchSize,
-      delayMs
-    );
-    const totalPRsCreated = Object.values(prCreatedPerRepo).reduce((s, v) => s + Number(v || 0), 0);
-    core.info(`Timestamp: counted PRs created at ${new Date().toISOString()}`);
+    // --- Aggregate metrics (use chunked searches by repo to avoid many per-repo calls) ---
+    // This reduces the number of Search API calls while still using the filtered repo list (excludeForks=true).
+    const SEARCH_REPO_CHUNK_SIZE = 10;
+    const SEARCH_DELAY_MS = delayMs || DEFAULT_DELAY_MS;
 
-    // PRs merged
-    const prMergedPerRepo = await processReposInBatches(
-      repos,
-      username,
-      tokenParam,
-      client,
-      async (owner, repo) => adapterPRsMerged(owner, repo, tokenParam, client, filterDate),
-      batchSize,
-      delayMs
-    );
-    const totalPRsMerged = Object.values(prMergedPerRepo).reduce((s, v) => s + Number(v || 0), 0);
-    core.info(`Timestamp: counted PRs merged at ${new Date().toISOString()}`);
-     
+    async function chunkedRepoSearchCount(client, owner, repoList, querySuffix, chunkSize = SEARCH_REPO_CHUNK_SIZE, delay = SEARCH_DELAY_MS) {
+      let total = 0;
+      for (let i = 0; i < repoList.length; i += chunkSize) {
+        const chunk = repoList.slice(i, i + chunkSize);
+        const repoQuery = chunk.map((r) => `repo:${owner}/${r}`).join(' OR ');
+        const fullQuery = `(${repoQuery}) ${querySuffix}`;
+        core.info(`Searching chunk ${Math.floor(i / chunkSize) + 1}/${Math.ceil(repoList.length / chunkSize)}: ${fullQuery}`);
+        const cnt = await getSearchCount(client, fullQuery);
+        total += Number(cnt || 0);
+        if (i + chunkSize < repoList.length) await sleep(delay);
+      }
+      return total;
+    }
+
+    // PRs created in window
+    const totalPRsCreated = await chunkedRepoSearchCount(client, username, repos, `is:pr created:>=${dateOnly}`, SEARCH_REPO_CHUNK_SIZE, delayMs);
+
+    // PRs merged in window
+    const totalPRsMerged = await chunkedRepoSearchCount(client, username, repos, `is:pr is:merged merged:>=${dateOnly}`, SEARCH_REPO_CHUNK_SIZE, delayMs);
+
     // Open PRs
-    const openPRsPerRepo = await processReposInBatches(
-      repos,
-      username,
-      tokenParam,
-      client,
-      async (owner, repo) => adapterOpenPRs(owner, repo, tokenParam, client),
-      batchSize,
-      delayMs
-    );
-    const totalOpenPRs = Object.values(openPRsPerRepo).reduce((s, v) => s + Number(v || 0), 0);
-    core.info(`Timestamp: counted PRs open at ${new Date().toISOString()}`);
-     
-    // Issues opened
-    const issuesOpenedPerRepo = await processReposInBatches(
-      repos,
-      username,
-      tokenParam,
-      client,
-      async (owner, repo) => adapterIssuesOpened(owner, repo, tokenParam, client, filterDate),
-      batchSize,
-      delayMs
-    );
-    const totalIssuesOpened = Object.values(issuesOpenedPerRepo).reduce((s, v) => s + Number(v || 0), 0);
-    core.info(`Timestamp: counted issues opened at ${new Date().toISOString()}`);
+    const totalOpenPRs = await chunkedRepoSearchCount(client, username, repos, `is:pr is:open`, SEARCH_REPO_CHUNK_SIZE, delayMs);
 
-    // Issues closed
-    const issuesClosedPerRepo = await processReposInBatches(
-      repos,
-      username,
-      tokenParam,
-      client,
-      async (owner, repo) => adapterIssuesClosed(owner, repo, tokenParam, client, filterDate),
-      batchSize,
-      delayMs
-    );
-    const totalIssuesClosed = Object.values(issuesClosedPerRepo).reduce((s, v) => s + Number(v || 0), 0);
-    core.info(`Timestamp: counted issues closed at ${new Date().toISOString()}`);
-     
+    // Issues opened in window
+    const totalIssuesOpened = await chunkedRepoSearchCount(client, username, repos, `is:issue created:>=${dateOnly}`, SEARCH_REPO_CHUNK_SIZE, delayMs);
+
+    // Issues closed in window
+    const totalIssuesClosed = await chunkedRepoSearchCount(client, username, repos, `is:issue closed:>=${dateOnly}`, SEARCH_REPO_CHUNK_SIZE, delayMs);
+
     // Open issues
-    const openIssuesPerRepo = await processReposInBatches(
-      repos,
-      username,
-      tokenParam,
-      client,
-      async (owner, repo) => adapterOpenIssues(owner, repo, tokenParam, client),
-      batchSize,
-      delayMs
-    );
-    const totalOpenIssues = Object.values(openIssuesPerRepo).reduce((s, v) => s + Number(v || 0), 0);
-    core.info(`Timestamp: counted issues still open at ${new Date().toISOString()}`);
+    const totalOpenIssues = await chunkedRepoSearchCount(client, username, repos, `is:issue is:open`, SEARCH_REPO_CHUNK_SIZE, delayMs);
 
     // Contributors exact unique:
     const contributorsListPerRepo = await processReposInBatches(
@@ -644,7 +603,6 @@ export const generateBadges = async (
       for (const id of arr) if (id) uniqueContributors.add(id);
     }
     const totalContributorsExact = uniqueContributors.size;
-    core.info(`Timestamp: counted contributors at ${new Date().toISOString()}`);
 
     // Active contributors exact unique:
     const contributorsActivePerRepo = await processReposInBatches(
@@ -662,7 +620,6 @@ export const generateBadges = async (
       for (const id of arr) if (id) uniqueActive.add(id);
     }
     const totalActiveContributorsExact = uniqueActive.size;
-    core.info(`Timestamp: counted active contributors at ${new Date().toISOString()}`);
 
     // ------- Commits (preferred GraphQL) -------
     const commitsPerRepo = await processReposInBatches(
@@ -675,47 +632,41 @@ export const generateBadges = async (
       delayMs
     );
     const totalCommits = Object.values(commitsPerRepo).reduce((s, v) => s + Number(v || 0), 0);
-    core.info(`Timestamp: counted commits at ${new Date().toISOString()}`);
 
-   // ------- Lines added/deleted: NO code_frequency; only per-commit fallback when commitCount > 0 and small -------
-   const codeFreqPerRepo = {};
-   const MAX_COMMIT_FALLBACK = maxCommitFallback || 1000;
-   const COMMIT_FALLBACK_THRESHOLD = commitFallbackThreshold || 50;
+    // ------- Lines added/deleted: only per-commit fallback (code_frequency disabled)
+    const codeFreqPerRepo = {};
+    const MAX_COMMIT_FALLBACK = maxCommitFallback || 1000;
+    const COMMIT_FALLBACK_THRESHOLD = commitFallbackThreshold || 50;
 
-   for (const repoName of repos) {
+    for (const repoName of repos) {
       core.info(`Timestamp: start processing ${repoName} at ${new Date().toISOString()}`);
       try {
-          // cheap commit count check first
-          const repoCommitCount = Number(commitsPerRepo[repoName] || 0);
-          core.info(`Commit count for ${repoName}: ${repoCommitCount}`);
+        const repoCommitCount = Number(commitsPerRepo[repoName] || 0);
+        core.info(`Commit count for ${repoName}: ${repoCommitCount}`);
 
-          // If there were no commits in the window, skip everything
-          if (repoCommitCount === 0) {
-            codeFreqPerRepo[repoName] = { additions: 0, deletions: 0 };
-            core.info(`Skipping per-repo stats for ${repoName} (0 commits in window).`);
-            continue;
-          }
-
-          // If commit count is too large, skip heavy per-commit fallback to avoid long runs
-          if (repoCommitCount > COMMIT_FALLBACK_THRESHOLD || repoCommitCount > MAX_COMMIT_FALLBACK) {
-            core.info(`Skipping per-commit fallback for ${repoName} due to high commit count (${repoCommitCount}). Adjust INPUT_COMMIT_FALLBACK_THRESHOLD / INPUT_MAX_COMMIT_FALLBACK to change.`);
-            codeFreqPerRepo[repoName] = { additions: 0, deletions: 0 };
-            continue;
-          }
-
-          // Run bounded per-commit aggregation (restricted to default branch inside helper)
-          core.info(`Timestamp: start per-commit fallback for ${repoName} at ${new Date().toISOString()}`);
-          const fallback = await getCodeStatsFromCommits(tokenParam, username, repoName, daysCount, MAX_COMMIT_FALLBACK, client);
-          core.info(`Timestamp: done per-commit fallback for ${repoName} at ${new Date().toISOString()}`);
-          codeFreqPerRepo[repoName] = fallback || { additions: 0, deletions: 0 };
-          core.info(`Per-commit fallback for ${repoName}: +${codeFreqPerRepo[repoName].additions} / -${codeFreqPerRepo[repoName].deletions} (commits=${repoCommitCount})`);
-      } catch (err) {
-          core.error(`Code stats processing failed for ${username}/${repoName}: ${err.message}`);
+        if (repoCommitCount === 0) {
           codeFreqPerRepo[repoName] = { additions: 0, deletions: 0 };
+          core.info(`Skipping per-repo stats for ${repoName} (0 commits in window).`);
+          continue;
+        }
+
+        if (repoCommitCount > COMMIT_FALLBACK_THRESHOLD || repoCommitCount > MAX_COMMIT_FALLBACK) {
+          core.info(`Skipping per-commit fallback for ${repoName} due to high commit count (${repoCommitCount}). Adjust INPUT_COMMIT_FALLBACK_THRESHOLD / INPUT_MAX_COMMIT_FALLBACK to change.`);
+          codeFreqPerRepo[repoName] = { additions: 0, deletions: 0 };
+          continue;
+        }
+
+        core.info(`Timestamp: start per-commit fallback for ${repoName} at ${new Date().toISOString()}`);
+        const fallback = await getCodeStatsFromCommits(tokenParam, username, repoName, daysCount, MAX_COMMIT_FALLBACK, client);
+        core.info(`Timestamp: done per-commit fallback for ${repoName} at ${new Date().toISOString()}`);
+        codeFreqPerRepo[repoName] = fallback || { additions: 0, deletions: 0 };
+        core.info(`Per-commit fallback for ${repoName}: +${codeFreqPerRepo[repoName].additions} / -${codeFreqPerRepo[repoName].deletions} (commits=${repoCommitCount})`);
+      } catch (err) {
+        core.error(`Code stats processing failed for ${username}/${repoName}: ${err.message}`);
+        codeFreqPerRepo[repoName] = { additions: 0, deletions: 0 };
       }
     }
 
-    core.info(`Timestamp: totals computation start at ${new Date().toISOString()}`);
     let totalAdditions = 0;
     let totalDeletions = 0;
     for (const val of Object.values(codeFreqPerRepo)) {
@@ -725,7 +676,7 @@ export const generateBadges = async (
     }
 
     // Diagnostics
-    core.info(`My Repositories: ${repoCount}`);
+    core.info(`Total repositories: ${repoCount}`);
     core.info(`Total PRs created in last ${daysCount} days: ${totalPRsCreated}`);
     core.info(`Total PRs merged in last ${daysCount} days: ${totalPRsMerged}`);
     core.info(`Total Open PRs: ${totalOpenPRs}`);
@@ -737,11 +688,10 @@ export const generateBadges = async (
     core.info(`Total commits in last ${daysCount} days: ${totalCommits}`);
     core.info(`Total lines added in last ${daysCount} days: ${totalAdditions}`);
     core.info(`Total lines deleted in last ${daysCount} days: ${totalDeletions}`);
-    core.info(`Timestamp: totals computation end at ${new Date().toISOString()}`);
 
     // Build badges in requested order
     const badges = [
-      generateBadgeMarkdown(`My Repositories`, repoCount, msgColor, lblColor),
+      generateBadgeMarkdown(`Total repositories`, repoCount, msgColor, lblColor),
       generateBadgeMarkdown(`PRs created in last ${daysCount} days`, totalPRsCreated, msgColor, lblColor),
       generateBadgeMarkdown(`Merged PRs in last ${daysCount} days`, totalPRsMerged, msgColor, lblColor),
       generateBadgeMarkdown(`Open PRs`, totalOpenPRs, msgColor, lblColor),
@@ -754,7 +704,6 @@ export const generateBadges = async (
       generateBadgeMarkdown(`Lines added (last ${daysCount} days)`, totalAdditions, msgColor, lblColor),
       generateBadgeMarkdown(`Lines deleted (last ${daysCount} days)`, totalDeletions, msgColor, lblColor)
     ];
-    core.info(`Timestamp: badges built at ${new Date().toISOString()}`);
 
     return badges;
   } catch (error) {
