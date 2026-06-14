@@ -387,33 +387,123 @@ export const getCommitsCountForRepo = async (token, owner, repo, sinceIso) => {
   }
 };
 
-/* Lines added/deleted using code_frequency */
-export const getCodeFrequencyForRepo = async (token, owner, repo, daysWindow = 30) => {
-  const url = `https://api.github.com/repos/${owner}/${repo}/stats/code_frequency`;
-  try {
-    const { json } = await withBackoff(() => restFetch(url, token));
-    if (!Array.isArray(json)) {
-      core.debug(`Unexpected code_frequency response for ${owner}/${repo}: ${JSON.stringify(json)}`);
-      return { additions: 0, deletions: 0 };
+// Fallback commit-by-commit aggregation (accurate but heavier)
+// Limits processed commits to avoid runaway API usage (tune maxCommits if needed)
+export const getCodeStatsFromCommits = async (token, owner, repo, daysWindow = 30, maxCommits = 1000) => {
+  const sinceIso = new Date(Date.now() - daysWindow * 24 * 60 * 60 * 1000).toISOString();
+  const perPage = 100;
+  let page = 1;
+  let processed = 0;
+  let additions = 0;
+  let deletions = 0;
+
+  core.info(`Falling back to per-commit aggregation for ${owner}/${repo} since ${sinceIso} (max ${maxCommits} commits)`);
+
+  outer: while (true) {
+    const url = `https://api.github.com/repos/${owner}/${repo}/commits?since=${encodeURIComponent(sinceIso)}&per_page=${perPage}&page=${page}`;
+    let commitsPage;
+    try {
+      const { json } = await withBackoff(() => restFetch(url, token));
+      commitsPage = json;
+    } catch (err) {
+      core.error(`Failed to list commits for ${owner}/${repo}: ${err.message}`);
+      break;
     }
 
-    const cutoff = Date.now() - daysWindow * 24 * 60 * 60 * 1000;
-    let additions = 0;
-    let deletions = 0;
-    for (const weekRow of json) {
-      const weekUnix = weekRow[0] * 1000;
-      const add = weekRow[1] || 0;
-      const del = Math.abs(weekRow[2] || 0);
-      if (weekUnix >= cutoff) {
-        additions += add;
-        deletions += del;
+    if (!Array.isArray(commitsPage) || commitsPage.length === 0) break;
+
+    for (const c of commitsPage) {
+      if (processed >= maxCommits) {
+        core.warn(`Reached maxCommits (${maxCommits}) for ${owner}/${repo}; stopping per-commit aggregation`);
+        break outer;
       }
+      const sha = c.sha;
+      if (!sha) continue;
+      try {
+        const { json: commitData } = await withBackoff(() => restFetch(`https://api.github.com/repos/${owner}/${repo}/commits/${sha}`, token));
+        const stats = commitData.stats || {};
+        additions += Number(stats.additions || 0);
+        deletions += Number(stats.deletions || 0);
+      } catch (err) {
+        core.debug(`Failed to fetch commit ${sha} for ${owner}/${repo}: ${err.message}`);
+      }
+      processed++;
+      // small pause to reduce burst pressure
+      await sleep(50);
     }
-    return { additions, deletions };
-  } catch (err) {
-    core.error(`Code frequency failed for ${owner}/${repo}: ${err.message}`);
-    return { additions: 0, deletions: 0 };
+
+    if (commitsPage.length < perPage) break;
+    page++;
   }
+
+  core.info(`Per-commit aggregated ${processed} commits for ${owner}/${repo}: +${additions} / -${deletions}`);
+  return { additions, deletions };
+};
+
+/**
+ * Robust code_frequency with 202-handling and fallback to commit aggregation.
+ * Replaces the previous getCodeFrequencyForRepo.
+ */
+export const getCodeFrequencyForRepo = async (token, owner, repo, daysWindow = 30) => {
+  const url = `https://api.github.com/repos/${owner}/${repo}/stats/code_frequency`;
+  const headers = {
+    Authorization: `bearer ${token}`,
+    Accept: 'application/vnd.github.v3+json',
+    'User-Agent': 'site-speed-readme-badge-generator'
+  };
+
+  const maxAttempts = 6; // tune if needed
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await fetch(url, { headers, method: 'GET' });
+      // If GitHub is computing, it returns 202 Accepted: retry with exponential backoff
+      if (res.status === 202) {
+        const delay = Math.min(60000, 2000 * Math.pow(2, attempt - 1));
+        core.debug(`code_frequency for ${owner}/${repo} returned 202 (computing). attempt=${attempt}, retrying in ${delay}ms`);
+        await sleep(delay);
+        continue;
+      }
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        core.error(`code_frequency HTTP ${res.status} ${res.statusText} for ${owner}/${repo}: ${text}`);
+        // treat as no data
+        return { additions: 0, deletions: 0 };
+      }
+
+      // Try to parse JSON
+      const json = await res.json();
+      // If not an array, return zeros
+      if (!Array.isArray(json)) {
+        core.debug(`code_frequency response not array for ${owner}/${repo}: ${JSON.stringify(json).slice(0, 500)}`);
+        return { additions: 0, deletions: 0 };
+      }
+
+      // Sum weeks that are within the window
+      const cutoff = Date.now() - daysWindow * 24 * 60 * 60 * 1000;
+      let additions = 0;
+      let deletions = 0;
+      for (const weekRow of json) {
+        const weekUnix = (weekRow[0] || 0) * 1000;
+        const add = Number(weekRow[1] || 0);
+        const del = Math.abs(Number(weekRow[2] || 0));
+        if (weekUnix >= cutoff) {
+          additions += add;
+          deletions += del;
+        }
+      }
+      core.debug(`code_frequency for ${owner}/${repo}: additions=${additions}, deletions=${deletions}`);
+      return { additions, deletions };
+    } catch (err) {
+      core.debug(`code_frequency attempt ${attempt} failed for ${owner}/${repo}: ${err.message}`);
+      // small jitter before next attempt
+      await sleep(500 * attempt);
+    }
+  }
+
+  // Still not available: fallback to per-commit aggregation
+  core.info(`code_frequency unavailable after retries for ${owner}/${repo}; falling back to commit aggregation`);
+  return getCodeStatsFromCommits(token, owner, repo, daysWindow, 1000);
 };
 
 /* -------------------------
