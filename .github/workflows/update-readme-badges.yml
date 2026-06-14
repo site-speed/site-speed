@@ -45,14 +45,14 @@ jobs:
 
       - name: add to readme
         run: |
-          readme=profile/README.md
+          readme=README.md
           
           # get SHA256 before
           beforeHash=$(sha256sum $readme | awk '{ print $1 }')
           
           # Define start and end markers
-          startMarker="<!-- start organization badges -->"
-          endMarker="<!-- end organization badges -->"
+          startMarker="<!-- start user badges -->"
+          endMarker="<!-- end user badges -->"
           
           replacement="${{ steps.user-readme-badge-generator.outputs.badges }}"
           
