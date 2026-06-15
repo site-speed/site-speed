@@ -550,7 +550,7 @@ export const generateBadges = async (
 
     // --- Aggregate metrics (use chunked searches by repo to avoid many per-repo calls) ---
     // This reduces the number of Search API calls while still using the filtered repo list (excludeForks=true).
-    const SEARCH_REPO_CHUNK_SIZE = 5;
+    const SEARCH_REPO_CHUNK_SIZE = 1;
     const SEARCH_DELAY_MS = delayMs || DEFAULT_DELAY_MS;
 
     async function chunkedRepoSearchCount(client, owner, repoList, querySuffix, chunkSize = SEARCH_REPO_CHUNK_SIZE, delay = SEARCH_DELAY_MS) {
@@ -633,7 +633,7 @@ export const generateBadges = async (
     const repoList = repos || [];
 
     // chunk size and delay tuned for your runs; adjust if needed
-    const ACTIVE_CONTRIB_CHUNK_SIZE = 5;
+    const ACTIVE_CONTRIB_CHUNK_SIZE = 1;
     const ACTIVE_CONTRIB_DELAY_MS = Math.max(1500, delayMs || 1500);
     const ACTIVE_CONTRIB_MAX_PAGES = 5;
 
