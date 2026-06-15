@@ -68,7 +68,7 @@ jobs:
           INPUT_LABEL_COLOR: '555'
           INPUT_EXCLUDE_FORKS: 'true'                  # <= new input: 'true' (default) or 'false'
           INPUT_BATCH_SIZE: '1'
-          INPUT_DELAY_MS: '3000'
+          INPUT_DELAY_MS: '2000'
           INPUT_MAX_COMMIT_FALLBACK: '1000'           # cap per-repo processed commits in fallback
           INPUT_COMMIT_FALLBACK_THRESHOLD: '500'       # only fallback when repo commit count <= this
     
@@ -79,7 +79,8 @@ jobs:
       - name: add to readme
         id: add-to-readme
         env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          # GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}    <= avoid token expiry if the main step above takes too long
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           #!/bin/bash
