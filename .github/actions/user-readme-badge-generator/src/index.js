@@ -139,18 +139,15 @@ export const generateBadgeMarkdown = (text, number, badgeColor, badgeLabelColor)
    GraphQL search helper
    ------------------------- */
 
-export const getSearchCount = async (client, query) => {
-  const res = await withBackoff(() =>
-    client(
-      `query ($q: String!) {
-          search(query: $q, type: ISSUE, first: 1) {
-            issueCount
-          }
-        }`,
-      { q: query }
-    )
-  );
-  return res?.search?.issueCount || 0;
+export const getSearchCount = async (client, query, token) => {
+  try {
+    const url = `https://api.github.com/search/issues?q=${encodeURIComponent(query)}&per_page=1`;
+    const { json } = await withBackoff(() => restFetch(url, token));
+    return json.total_count || 0;
+  } catch (err) {
+    core.error(`Search query failed for q="${query}": ${err.message}`);
+    return 0;
+  }
 };
 
 /* -------------------------
@@ -553,7 +550,7 @@ export const generateBadges = async (
     const SEARCH_REPO_CHUNK_SIZE = 1;
     const SEARCH_DELAY_MS = delayMs || DEFAULT_DELAY_MS;
 
-    async function chunkedRepoSearchCount(client, owner, repoList, querySuffix, chunkSize = SEARCH_REPO_CHUNK_SIZE, delay = SEARCH_DELAY_MS) {
+    async function chunkedRepoSearchCount(client, owner, repoList, querySuffix, token, chunkSize = SEARCH_REPO_CHUNK_SIZE, delay = SEARCH_DELAY_MS) {
       let total = 0;
       for (let i = 0; i < repoList.length; i += chunkSize) {
         const chunk = repoList.slice(i, i + chunkSize);
@@ -562,7 +559,7 @@ export const generateBadges = async (
         core.info(`Searching chunk ${Math.floor(i / chunkSize) + 1}/${Math.ceil(repoList.length / chunkSize)}: ${fullQuery}`);
         
         try {
-          const cnt = await getSearchCount(client, fullQuery);
+          const cnt = await getSearchCount(client, fullQuery, token);
           core.info(`Chunk result: ${cnt}`);
           total += Number(cnt || 0);
         } catch (err) {
@@ -570,7 +567,7 @@ export const generateBadges = async (
             core.warn(`Chunked search failed with validation error; falling back to per-repo search for this chunk.`);
             for (const repo of chunk) {
               const singleQuery = `repo:${repo} ${querySuffix}`;
-              const singleCnt = await getSearchCount(client, singleQuery);
+              const singleCnt = await getSearchCount(client, singleQuery, token);
               total += Number(singleCnt || 0);
               await sleep(100);
             }
@@ -585,22 +582,22 @@ export const generateBadges = async (
     }
 
     // PRs created in window
-    const totalPRsCreated = await chunkedRepoSearchCount(client, username, repos, `is:pr created:>=${dateOnly}`, SEARCH_REPO_CHUNK_SIZE, delayMs);
+    const totalPRsCreated = await chunkedRepoSearchCount(client, username, repos, `is:pr created:>=${dateOnly}`, tokenParam, SEARCH_REPO_CHUNK_SIZE, delayMs);
 
     // PRs merged in window
-    const totalPRsMerged = await chunkedRepoSearchCount(client, username, repos, `is:pr is:merged merged:>=${dateOnly}`, SEARCH_REPO_CHUNK_SIZE, delayMs);
+    const totalPRsMerged = await chunkedRepoSearchCount(client, username, repos, `is:pr is:merged merged:>=${dateOnly}`, tokenParam, SEARCH_REPO_CHUNK_SIZE, delayMs);
 
     // Open PRs
-    const totalOpenPRs = await chunkedRepoSearchCount(client, username, repos, `is:pr is:open`, SEARCH_REPO_CHUNK_SIZE, delayMs);
+    const totalOpenPRs = await chunkedRepoSearchCount(client, username, repos, `is:pr is:open`, tokenParam, SEARCH_REPO_CHUNK_SIZE, delayMs);
 
     // Issues opened in window
-    const totalIssuesOpened = await chunkedRepoSearchCount(client, username, repos, `is:issue created:>=${dateOnly}`, SEARCH_REPO_CHUNK_SIZE, delayMs);
+    const totalIssuesOpened = await chunkedRepoSearchCount(client, username, repos, `is:issue created:>=${dateOnly}`, tokenParam, SEARCH_REPO_CHUNK_SIZE, delayMs);
 
     // Issues closed in window
-    const totalIssuesClosed = await chunkedRepoSearchCount(client, username, repos, `is:issue closed:>=${dateOnly}`, SEARCH_REPO_CHUNK_SIZE, delayMs);
+    const totalIssuesClosed = await chunkedRepoSearchCount(client, username, repos, `is:issue closed:>=${dateOnly}`, tokenParam, SEARCH_REPO_CHUNK_SIZE, delayMs);
 
     // Open issues
-    const totalOpenIssues = await chunkedRepoSearchCount(client, username, repos, `is:issue is:open`, SEARCH_REPO_CHUNK_SIZE, delayMs);
+    const totalOpenIssues = await chunkedRepoSearchCount(client, username, repos, `is:issue is:open`, tokenParam, SEARCH_REPO_CHUNK_SIZE, delayMs);
 
     // Contributors exact unique:
     const contributorsListPerRepo = await processReposInBatches(
