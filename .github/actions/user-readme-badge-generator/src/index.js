@@ -189,7 +189,7 @@ export const getRepositories = async (username, graphqlClient, excludeForks = tr
         `query ($login: String!, $after: String) {
            user(login: $login) {
              repositories(first: 100, after: $after, affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER]) {
-               nodes { name isFork }
+               nodes { nameWithOwner isFork }
                pageInfo { endCursor hasNextPage }
              }
            }
@@ -202,7 +202,7 @@ export const getRepositories = async (username, graphqlClient, excludeForks = tr
     }
     const repoNodes = response.user.repositories.nodes || [];
     const filtered = excludeForks ? repoNodes.filter((r) => !r.isFork) : repoNodes;
-    repositories.push(...filtered.map((r) => r.name));
+    repositories.push(...filtered.map((r) => r.nameWithOwner));
     hasNextPage = response.user.repositories.pageInfo.hasNextPage;
     endCursor = response.user.repositories.pageInfo.endCursor;
   }
@@ -459,7 +459,10 @@ const processReposInBatches = async (repos, owner, token, client, metricFn, batc
   for (let i = 0; i < repos.length; i += batchSize) {
     const batch = repos.slice(i, i + batchSize);
     core.debug(`Processing batch ${Math.floor(i / batchSize) + 1} (${batch.length} repos)`);
-    const promises = batch.map((r) => metricFn(owner, r, token, client));
+    const promises = batch.map((r) => {
+      const [actualOwner, repoName] = r.split('/');
+      return metricFn(actualOwner, repoName, token, client);
+    });
     const resolved = await Promise.all(promises);
     for (let j = 0; j < batch.length; j++) {
       results[batch[j]] = resolved[j];
@@ -559,7 +562,7 @@ export const generateBadges = async (
       let total = 0;
       for (let i = 0; i < repoList.length; i += chunkSize) {
         const chunk = repoList.slice(i, i + chunkSize);
-        const repoQuery = chunk.map((r) => `repo:${owner}/${r}`).join(' OR ');
+        const repoQuery = chunk.map((r) => `repo:${r}`).join(' OR ');
         const fullQuery = `(${repoQuery}) ${querySuffix}`;
         core.info(`Searching chunk ${Math.floor(i / chunkSize) + 1}/${Math.ceil(repoList.length / chunkSize)}: ${fullQuery}`);
         const cnt = await getSearchCount(client, fullQuery);
@@ -630,7 +633,7 @@ export const generateBadges = async (
         }
 
         const chunk = repoList.slice(i, i + chunkSize);
-        const repoQuery = chunk.map((r) => `repo:${owner}/${r}`).join(' OR ');
+        const repoQuery = chunk.map((r) => `repo:${r}`).join(' OR ');
         const qBase = `(${repoQuery}) author-date:>=${dateOnlyLocal}`;
         core.info(`Commit-search chunk ${Math.floor(i / chunkSize) + 1}/${Math.ceil(repoList.length / chunkSize)}: ${qBase}`);
 
@@ -704,32 +707,34 @@ export const generateBadges = async (
     const MAX_COMMIT_FALLBACK = maxCommitFallback || 1000;
     const COMMIT_FALLBACK_THRESHOLD = commitFallbackThreshold || 50;
 
-    for (const repoName of repos) {
-      core.info(`Timestamp: start processing ${repoName} at ${new Date().toISOString()}`);
+    for (const repoFullName of repos) {
+      core.info(`Timestamp: start processing ${repoFullName} at ${new Date().toISOString()}`);
       try {
-        const repoCommitCount = Number(commitsPerRepo[repoName] || 0);
-        core.info(`Commit count for ${repoName}: ${repoCommitCount}`);
+        const repoCommitCount = Number(commitsPerRepo[repoFullName] || 0);
+        core.info(`Commit count for ${repoFullName}: ${repoCommitCount}`);
+
+        const [actualOwner, repoName] = repoFullName.split('/');
 
         if (repoCommitCount === 0) {
-          codeFreqPerRepo[repoName] = { additions: 0, deletions: 0 };
-          core.info(`Skipping per-repo stats for ${repoName} (0 commits in window).`);
+          codeFreqPerRepo[repoFullName] = { additions: 0, deletions: 0 };
+          core.info(`Skipping per-repo stats for ${repoFullName} (0 commits in window).`);
           continue;
         }
 
         if (repoCommitCount > COMMIT_FALLBACK_THRESHOLD || repoCommitCount > MAX_COMMIT_FALLBACK) {
-          core.info(`Skipping per-commit fallback for ${repoName} due to high commit count (${repoCommitCount}). Adjust INPUT_COMMIT_FALLBACK_THRESHOLD / INPUT_MAX_COMMIT_FALLBACK to change.`);
-          codeFreqPerRepo[repoName] = { additions: 0, deletions: 0 };
+          core.info(`Skipping per-commit fallback for ${repoFullName} due to high commit count (${repoCommitCount}). Adjust INPUT_COMMIT_FALLBACK_THRESHOLD / INPUT_MAX_COMMIT_FALLBACK to change.`);
+          codeFreqPerRepo[repoFullName] = { additions: 0, deletions: 0 };
           continue;
         }
 
-        core.info(`Timestamp: start per-commit fallback for ${repoName} at ${new Date().toISOString()}`);
-        const fallback = await getCodeStatsFromCommits(tokenParam, username, repoName, daysCount, MAX_COMMIT_FALLBACK, client);
-        core.info(`Timestamp: done per-commit fallback for ${repoName} at ${new Date().toISOString()}`);
-        codeFreqPerRepo[repoName] = fallback || { additions: 0, deletions: 0 };
-        core.info(`Per-commit fallback for ${repoName}: +${codeFreqPerRepo[repoName].additions} / -${codeFreqPerRepo[repoName].deletions} (commits=${repoCommitCount})`);
+        core.info(`Timestamp: start per-commit fallback for ${repoFullName} at ${new Date().toISOString()}`);
+        const fallback = await getCodeStatsFromCommits(tokenParam, actualOwner, repoName, daysCount, MAX_COMMIT_FALLBACK, client);
+        core.info(`Timestamp: done per-commit fallback for ${repoFullName} at ${new Date().toISOString()}`);
+        codeFreqPerRepo[repoFullName] = fallback || { additions: 0, deletions: 0 };
+        core.info(`Per-commit fallback for ${repoFullName}: +${codeFreqPerRepo[repoFullName].additions} / -${codeFreqPerRepo[repoFullName].deletions} (commits=${repoCommitCount})`);
       } catch (err) {
-        core.error(`Code stats processing failed for ${username}/${repoName}: ${err.message}`);
-        codeFreqPerRepo[repoName] = { additions: 0, deletions: 0 };
+        core.error(`Code stats processing failed for ${repoFullName}: ${err.message}`);
+        codeFreqPerRepo[repoFullName] = { additions: 0, deletions: 0 };
       }
     }
 
