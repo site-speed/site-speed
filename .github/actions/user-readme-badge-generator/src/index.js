@@ -650,6 +650,7 @@ export const generateBadges = async (
             if (email) seenSet.add(email);
           }
         }
+        core.info(`Found ${items.length} items in page ${page}. Current total unique: ${seenSet.size}`);
         if (!Array.isArray(items) || items.length < 100) break;
         await sleep(200);
       }
