@@ -631,7 +631,7 @@ export const generateBadges = async (
 
         const chunk = repoList.slice(i, i + chunkSize);
         const repoQuery = chunk.map((r) => `repo:${owner}/${r}`).join(' OR ');
-        const qBase = `${repoQuery} author-date:>=${dateOnlyLocal}`;
+        const qBase = `(${repoQuery}) author-date:>=${dateOnlyLocal}`;
         core.info(`Commit-search chunk ${Math.floor(i / chunkSize) + 1}/${Math.ceil(repoList.length / chunkSize)}: ${qBase}`);
 
         // page through results for this chunk
