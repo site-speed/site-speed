@@ -175,13 +175,21 @@ export const getRepositories = async (username, graphqlClient, excludeForks = tr
   let endCursor = null;
   let hasNextPage = true;
   const repositories = [];
+  let openIssuesCount = 0;
+  let openPRsCount = 0;
+
   while (hasNextPage) {
     const response = await withBackoff(() =>
       graphqlClient(
         `query ($login: String!, $after: String) {
-           user(login: $login) {
-             repositories(first: 100, after: $after, affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER]) {
-               nodes { nameWithOwner isFork }
+           repositoryOwner(login: $login) {
+             repositories(first: 100, after: $after, affiliations: [OWNER]) {
+               nodes { 
+                 nameWithOwner 
+                 isFork
+                 issues(states: OPEN) { totalCount }
+                 pullRequests(states: OPEN) { totalCount }
+               }
                pageInfo { endCursor hasNextPage }
              }
            }
@@ -189,16 +197,20 @@ export const getRepositories = async (username, graphqlClient, excludeForks = tr
         { login: username, after: endCursor }
       )
     );
-    if (!response || !response.user || !response.user.repositories) {
-      throw new Error(`Failed to fetch repositories for user '${username}'`);
+    if (!response || !response.repositoryOwner || !response.repositoryOwner.repositories) {
+      throw new Error(`Failed to fetch repositories for owner '${username}'`);
     }
-    const repoNodes = response.user.repositories.nodes || [];
-    const filtered = excludeForks ? repoNodes.filter((r) => !r.isFork) : repoNodes;
-    repositories.push(...filtered.map((r) => r.nameWithOwner));
-    hasNextPage = response.user.repositories.pageInfo.hasNextPage;
-    endCursor = response.user.repositories.pageInfo.endCursor;
+    const repoNodes = response.repositoryOwner.repositories.nodes || [];
+    for (const r of repoNodes) {
+      if (excludeForks && r.isFork) continue;
+      repositories.push(r.nameWithOwner);
+      openIssuesCount += r.issues?.totalCount || 0;
+      openPRsCount += r.pullRequests?.totalCount || 0;
+    }
+    hasNextPage = response.repositoryOwner.repositories.pageInfo.hasNextPage;
+    endCursor = response.repositoryOwner.repositories.pageInfo.endCursor;
   }
-  return repositories;
+  return { repositories, openIssuesCount, openPRsCount };
 };
 
 /* -------------------------
@@ -533,7 +545,7 @@ export const generateBadges = async (
     }
 
     // Repositories (filtered)
-    const repos = await getRepositories(username, client, excludeForks);
+    const { repositories: repos, openIssuesCount, openPRsCount } = await getRepositories(username, client, excludeForks);
     core.info(`Timestamp: repos fetched at ${new Date().toISOString()}`);
     core.info(`Fetched ${repos.length} repositories (excludeForks=${excludeForks}): ${repos.slice(0, 20).join(', ')}`);
     const repoCount = repos.length;
@@ -582,22 +594,22 @@ export const generateBadges = async (
     }
 
     // PRs created in window
-    const totalPRsCreated = await chunkedRepoSearchCount(client, username, repos, `is:pr created:>=${dateOnly} fork:true`, tokenParam, SEARCH_REPO_CHUNK_SIZE, delayMs);
+    const totalPRsCreated = await chunkedRepoSearchCount(client, username, repos, `is:pr created:>=${dateOnly}`, tokenParam, SEARCH_REPO_CHUNK_SIZE, delayMs);
 
     // PRs merged in window
-    const totalPRsMerged = await chunkedRepoSearchCount(client, username, repos, `is:pr is:merged merged:>=${dateOnly} fork:true`, tokenParam, SEARCH_REPO_CHUNK_SIZE, delayMs);
+    const totalPRsMerged = await chunkedRepoSearchCount(client, username, repos, `is:pr is:merged merged:>=${dateOnly}`, tokenParam, SEARCH_REPO_CHUNK_SIZE, delayMs);
 
-    // Open PRs
-    const totalOpenPRs = await chunkedRepoSearchCount(client, username, repos, `is:pr is:open fork:true`, tokenParam, SEARCH_REPO_CHUNK_SIZE, delayMs);
+    // Open PRs (use pre-fetched GraphQL count for 100% accuracy)
+    const totalOpenPRs = openPRsCount;
 
     // Issues opened in window
-    const totalIssuesOpened = await chunkedRepoSearchCount(client, username, repos, `is:issue created:>=${dateOnly} fork:true`, tokenParam, SEARCH_REPO_CHUNK_SIZE, delayMs);
+    const totalIssuesOpened = await chunkedRepoSearchCount(client, username, repos, `is:issue created:>=${dateOnly}`, tokenParam, SEARCH_REPO_CHUNK_SIZE, delayMs);
 
     // Issues closed in window
-    const totalIssuesClosed = await chunkedRepoSearchCount(client, username, repos, `is:issue closed:>=${dateOnly} fork:true`, tokenParam, SEARCH_REPO_CHUNK_SIZE, delayMs);
+    const totalIssuesClosed = await chunkedRepoSearchCount(client, username, repos, `is:issue closed:>=${dateOnly}`, tokenParam, SEARCH_REPO_CHUNK_SIZE, delayMs);
 
-    // Open issues
-    const totalOpenIssues = await chunkedRepoSearchCount(client, username, repos, `is:issue is:open fork:true`, tokenParam, SEARCH_REPO_CHUNK_SIZE, delayMs);
+    // Open issues (use pre-fetched GraphQL count for 100% accuracy)
+    const totalOpenIssues = openIssuesCount;
 
     // Contributors exact unique:
     const contributorsListPerRepo = await processReposInBatches(
