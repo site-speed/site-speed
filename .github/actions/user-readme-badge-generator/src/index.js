@@ -566,6 +566,7 @@ export const generateBadges = async (
         const fullQuery = `(${repoQuery}) ${querySuffix}`;
         core.info(`Searching chunk ${Math.floor(i / chunkSize) + 1}/${Math.ceil(repoList.length / chunkSize)}: ${fullQuery}`);
         const cnt = await getSearchCount(client, fullQuery);
+        core.info(`Chunk result: ${cnt}`);
         total += Number(cnt || 0);
         if (i + chunkSize < repoList.length) await sleep(delay);
       }
@@ -637,10 +638,10 @@ export const generateBadges = async (
         const qBase = `(${repoQuery}) author-date:>=${dateOnlyLocal}`;
         core.info(`Commit-search chunk ${Math.floor(i / chunkSize) + 1}/${Math.ceil(repoList.length / chunkSize)}: ${qBase}`);
 
-        // page through results for this chunk
-        for (let page = 1; page <= maxPagesPerChunk; page++) {
-          const url = `https://api.github.com/search/commits?q=${encodeURIComponent(qBase)}&per_page=100&page=${page}`;
-          try {
+        try {
+          // page through results for this chunk
+          for (let page = 1; page <= maxPagesPerChunk; page++) {
+            const url = `https://api.github.com/search/commits?q=${encodeURIComponent(qBase)}&per_page=100&page=${page}`;
             const { json } = await withBackoff(() => restFetch(url, token, { accept: 'application/vnd.github.cloak-preview' }));
             const items = json.items || [];
             for (const item of items) {
@@ -655,11 +656,9 @@ export const generateBadges = async (
             if (!Array.isArray(items) || items.length < 100) break;
             // optional small delay between pages to be conservative
             await sleep(200);
-          } catch (err) {
-            core.error(`Chunk commit search failed for ${owner} chunk starting ${chunk[0]} page ${page}: ${err.message}`);
-            // if we get a rate-limit 403 here the withBackoff will have retried; break this chunk to avoid spinning
-            break;
           }
+        } catch (err) {
+          core.error(`Chunk commit search failed for ${owner} chunk starting ${chunk[0]} page 1: ${err.message}`);
         }
 
         // small pause between chunks to avoid burst
