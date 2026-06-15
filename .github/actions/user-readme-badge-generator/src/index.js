@@ -140,22 +140,17 @@ export const generateBadgeMarkdown = (text, number, badgeColor, badgeLabelColor)
    ------------------------- */
 
 export const getSearchCount = async (client, query) => {
-  try {
-    const res = await withBackoff(() =>
-      client(
-        `query ($q: String!) {
-           search(query: $q, type: ISSUE, first: 1) {
-             issueCount
-           }
-         }`,
-        { q: query }
-      )
-    );
-    return res?.search?.issueCount || 0;
-  } catch (err) {
-    core.error(`Search query failed for q="${query}": ${err.message}`);
-    return 0;
-  }
+  const res = await withBackoff(() =>
+    client(
+      `query ($q: String!) {
+          search(query: $q, type: ISSUE, first: 1) {
+            issueCount
+          }
+        }`,
+      { q: query }
+    )
+  );
+  return res?.search?.issueCount || 0;
 };
 
 /* -------------------------
@@ -555,7 +550,7 @@ export const generateBadges = async (
 
     // --- Aggregate metrics (use chunked searches by repo to avoid many per-repo calls) ---
     // This reduces the number of Search API calls while still using the filtered repo list (excludeForks=true).
-    const SEARCH_REPO_CHUNK_SIZE = 10;
+    const SEARCH_REPO_CHUNK_SIZE = 5;
     const SEARCH_DELAY_MS = delayMs || DEFAULT_DELAY_MS;
 
     async function chunkedRepoSearchCount(client, owner, repoList, querySuffix, chunkSize = SEARCH_REPO_CHUNK_SIZE, delay = SEARCH_DELAY_MS) {
@@ -565,9 +560,25 @@ export const generateBadges = async (
         const repoQuery = chunk.map((r) => `repo:${r}`).join(' OR ');
         const fullQuery = `(${repoQuery}) ${querySuffix}`;
         core.info(`Searching chunk ${Math.floor(i / chunkSize) + 1}/${Math.ceil(repoList.length / chunkSize)}: ${fullQuery}`);
-        const cnt = await getSearchCount(client, fullQuery);
-        core.info(`Chunk result: ${cnt}`);
-        total += Number(cnt || 0);
+        
+        try {
+          const cnt = await getSearchCount(client, fullQuery);
+          core.info(`Chunk result: ${cnt}`);
+          total += Number(cnt || 0);
+        } catch (err) {
+          if (err.message.includes('Validation Failed') || err.message.includes('422')) {
+            core.warn(`Chunked search failed with validation error; falling back to per-repo search for this chunk.`);
+            for (const repo of chunk) {
+              const singleQuery = `repo:${repo} ${querySuffix}`;
+              const singleCnt = await getSearchCount(client, singleQuery);
+              total += Number(singleCnt || 0);
+              await sleep(100);
+            }
+          } else {
+            throw err;
+          }
+        }
+
         if (i + chunkSize < repoList.length) await sleep(delay);
       }
       return total;
@@ -608,7 +619,6 @@ export const generateBadges = async (
     }
     const totalContributorsExact = uniqueContributors.size;
 
-    // --- Replace per-repo active-contributors work with a chunked commit-search (fewer requests) ---
     async function getRateLimit(token) {
       try {
         const { json } = await withBackoff(() => restFetch('https://api.github.com/rate_limit', token));
@@ -619,16 +629,41 @@ export const generateBadges = async (
       }
     }
 
-    async function chunkedActiveContributors(token, owner, repoList, sinceIso, chunkSize = 10, delay = 1500, maxPagesPerChunk = 5) {
+    // use the filtered 'repos' array (excludeForks=true)
+    const repoList = repos || [];
+
+    // chunk size and delay tuned for your runs; adjust if needed
+    const ACTIVE_CONTRIB_CHUNK_SIZE = 5;
+    const ACTIVE_CONTRIB_DELAY_MS = Math.max(1500, delayMs || 1500);
+    const ACTIVE_CONTRIB_MAX_PAGES = 5;
+
+    async function fetchCommitsForQuery(token, query, maxPages, seenSet) {
+      for (let page = 1; page <= maxPages; page++) {
+        const url = `https://api.github.com/search/commits?q=${encodeURIComponent(query)}&per_page=100&page=${page}`;
+        const { json } = await withBackoff(() => restFetch(url, token, { accept: 'application/vnd.github.cloak-preview' }));
+        const items = json.items || [];
+        for (const item of items) {
+          const login = item.author?.login;
+          if (login) seenSet.add(login);
+          else {
+            const email = item.commit?.author?.email || item.commit?.committer?.email;
+            if (email) seenSet.add(email);
+          }
+        }
+        if (!Array.isArray(items) || items.length < 100) break;
+        await sleep(200);
+      }
+    }
+
+    async function chunkedActiveContributors(token, owner, repoList, sinceIso, chunkSize = ACTIVE_CONTRIB_CHUNK_SIZE, delay = ACTIVE_CONTRIB_DELAY_MS, maxPagesPerChunk = ACTIVE_CONTRIB_MAX_PAGES) {
       const seen = new Set();
       const dateOnlyLocal = new Date(sinceIso).toISOString().split('T')[0];
 
       for (let i = 0; i < repoList.length; i += chunkSize) {
-        // rate-limit safety: check remaining and sleep until reset if low
+        // rate-limit safety...
         const rl = await getRateLimit(token);
         if (rl && typeof rl.remaining === 'number' && rl.remaining < 10) {
-          const waitUntil = (rl.reset * 1000) - Date.now();
-          const waitMs = Math.max(waitUntil, 5000);
+          const waitMs = Math.max((rl.reset * 1000) - Date.now(), 5000);
           core.info(`Low rate-limit remaining (${rl.remaining}), sleeping ${Math.ceil(waitMs/1000)}s until reset`);
           await sleep(waitMs);
         }
@@ -639,42 +674,29 @@ export const generateBadges = async (
         core.info(`Commit-search chunk ${Math.floor(i / chunkSize) + 1}/${Math.ceil(repoList.length / chunkSize)}: ${qBase}`);
 
         try {
-          // page through results for this chunk
-          for (let page = 1; page <= maxPagesPerChunk; page++) {
-            const url = `https://api.github.com/search/commits?q=${encodeURIComponent(qBase)}&per_page=100&page=${page}`;
-            const { json } = await withBackoff(() => restFetch(url, token, { accept: 'application/vnd.github.cloak-preview' }));
-            const items = json.items || [];
-            for (const item of items) {
-              const login = item.author?.login;
-              if (login) seen.add(login);
-              else {
-                const email = item.commit?.author?.email || item.commit?.committer?.email;
-                if (email) seen.add(email);
-              }
-            }
-            // stop if fewer than a full page returned
-            if (!Array.isArray(items) || items.length < 100) break;
-            // optional small delay between pages to be conservative
-            await sleep(200);
-          }
+          await fetchCommitsForQuery(token, qBase, maxPagesPerChunk, seen);
         } catch (err) {
-          core.error(`Chunk commit search failed for ${owner} chunk starting ${chunk[0]} page 1: ${err.message}`);
+          if (err.message.includes('Validation Failed') || err.message.includes('422')) {
+            core.warn(`Chunked commit search failed with validation error; falling back to per-repo search for this chunk.`);
+            for (const repo of chunk) {
+              const singleQuery = `repo:${repo} author-date:>=${dateOnlyLocal}`;
+              try {
+                await fetchCommitsForQuery(token, singleQuery, maxPagesPerChunk, seen);
+              } catch (innerErr) {
+                core.error(`Failed to fetch commits for single repo ${repo}: ${innerErr.message}`);
+              }
+              await sleep(300);
+            }
+          } else {
+            core.error(`Chunk commit search failed for ${owner} chunk starting ${chunk[0]} page 1: ${err.message}`);
+          }
         }
 
-        // small pause between chunks to avoid burst
         if (i + chunkSize < repoList.length) await sleep(delay);
       }
 
       return Array.from(seen);
     }
-
-    // use the filtered 'repos' array (excludeForks=true)
-    const repoList = repos || [];
-
-    // chunk size and delay tuned for your runs; adjust if needed
-    const ACTIVE_CONTRIB_CHUNK_SIZE = 8;
-    const ACTIVE_CONTRIB_DELAY_MS = Math.max(1500, delayMs || 1500);
-    const ACTIVE_CONTRIB_MAX_PAGES = 5;
 
     const activeContribs = await chunkedActiveContributors(
       tokenParam,
