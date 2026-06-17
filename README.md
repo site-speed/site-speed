@@ -19,19 +19,3 @@ Here are some ideas to get you started:
 ![My Repositories](https://img.shields.io/badge/My%20Repositories-26-blue?labelColor=555) ![PRs created in last 30 days](https://img.shields.io/badge/PRs%20created%20in%20last%2030%20days-0-blue?labelColor=555) ![Merged PRs in last 30 days](https://img.shields.io/badge/Merged%20PRs%20in%20last%2030%20days-0-blue?labelColor=555) ![Open PRs](https://img.shields.io/badge/Open%20PRs-0-blue?labelColor=555) ![Issues opened in last 30 days](https://img.shields.io/badge/Issues%20opened%20in%20last%2030%20days-171-blue?labelColor=555) ![Issues closed in last 30 days](https://img.shields.io/badge/Issues%20closed%20in%20last%2030%20days-139-blue?labelColor=555) ![Open issues](https://img.shields.io/badge/Open%20issues-37-blue?labelColor=555) ![Contributors (unique)](https://img.shields.io/badge/Contributors%20(unique)-3-blue?labelColor=555) ![Active contributors (last 30d)](https://img.shields.io/badge/Active%20contributors%20(last%2030d)-2-blue?labelColor=555) ![Commits in last 30 days](https://img.shields.io/badge/Commits%20in%20last%2030%20days-407-blue?labelColor=555) ![Lines added (last 30 days)](https://img.shields.io/badge/Lines%20added%20(last%2030%20days)-2762029-blue?labelColor=555) ![Lines deleted (last 30 days)](https://img.shields.io/badge/Lines%20deleted%20(last%2030%20days)-620936-blue?labelColor=555)
 <!-- end user badges -->
 
----
-
-### GitHub Actions for README Badges
-
-This repository contains two reusable GitHub Actions for generating markdown badges:
-
-1. **[User README Badge Generator](.github/actions/user-readme-badge-generator)**: Aggregates metrics across **all** your repositories. Best for your profile README.
-2. **[Repository README Badge Generator](.github/actions/readme-badge-generator)**: Generates metrics for a **single** repository. Best for project-specific READMEs.
-
-#### Quick Start (Standalone Repo)
-To add badges to any repository, copy [**repo-badges-template.yml**](.github/workflows/repo-badges-template.yml) to your `.github/workflows` folder and ensure your `README.md` contains these markers:
-```html
-<!-- start user badges -->
-<!-- end user badges -->
-```
-
