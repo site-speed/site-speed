@@ -35,6 +35,9 @@ inputs:
 outputs:
   badges:
     description: 'The generated markdown badges'
+branding:
+  icon: 'award'
+  color: 'blue'
 runs:
   using: 'node24'
   main: 'dist/index.js'
