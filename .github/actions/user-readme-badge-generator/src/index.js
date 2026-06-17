@@ -557,56 +557,36 @@ export const generateBadges = async (
     core.debug(`Filtering metrics for last ${daysCount} days since ${filterDate}`);
     const dateOnly = filterDate.split('T')[0];
 
-    // --- Aggregate metrics (use chunked searches by repo to avoid many per-repo calls) ---
-    // This reduces the number of Search API calls while still using the filtered repo list (excludeForks=true).
-    const SEARCH_REPO_CHUNK_SIZE = 5;
-    const SEARCH_DELAY_MS = delayMs || DEFAULT_DELAY_MS;
+    // --- Aggregate metrics (Per-repo REST calls for maximum accuracy) ---
+    const METRIC_DELAY_MS = Math.max(200, delayMs || 200);
 
-    async function chunkedRepoSearchCount(client, owner, repoList, querySuffix, token, chunkSize = SEARCH_REPO_CHUNK_SIZE, delay = SEARCH_DELAY_MS) {
+    async function getAggregateMetric(token, repoList, querySuffix, delay = METRIC_DELAY_MS) {
       let total = 0;
-      for (let i = 0; i < repoList.length; i += chunkSize) {
-        const chunk = repoList.slice(i, i + chunkSize);
-        const repoQuery = chunk.map((r) => `repo:${r}`).join(' OR ');
-        const fullQuery = `(${repoQuery}) ${querySuffix}`;
-        core.info(`Searching chunk ${Math.floor(i / chunkSize) + 1}/${Math.ceil(repoList.length / chunkSize)}: ${fullQuery}`);
-        
-        try {
-          const cnt = await getSearchCount(client, fullQuery, token);
-          core.info(`Chunk result: ${cnt}`);
-          total += Number(cnt || 0);
-        } catch (err) {
-          if (err.message.includes('Validation Failed') || err.message.includes('422')) {
-            core.warn(`Chunked search failed with validation error; falling back to per-repo search for this chunk.`);
-            for (const repo of chunk) {
-              const singleQuery = `repo:${repo} ${querySuffix}`;
-              const singleCnt = await getSearchCount(client, singleQuery, token);
-              total += Number(singleCnt || 0);
-              await sleep(100);
-            }
-          } else {
-            throw err;
-          }
-        }
-
-        if (i + chunkSize < repoList.length) await sleep(delay);
+      for (const repo of repoList) {
+        const query = `repo:${repo} ${querySuffix}`;
+        const count = await getSearchCount(null, query, token);
+        total += Number(count || 0);
+        await sleep(delay);
       }
       return total;
     }
 
+    core.info(`Fetching time-windowed metrics for ${repos.length} repositories...`);
+
     // PRs created in window
-    const totalPRsCreated = await chunkedRepoSearchCount(client, username, repos, `is:pr created:>=${dateOnly}`, tokenParam, SEARCH_REPO_CHUNK_SIZE, delayMs);
+    const totalPRsCreated = await getAggregateMetric(tokenParam, repos, `is:pr created:>=${dateOnly}`);
 
     // PRs merged in window
-    const totalPRsMerged = await chunkedRepoSearchCount(client, username, repos, `is:pr is:merged merged:>=${dateOnly}`, tokenParam, SEARCH_REPO_CHUNK_SIZE, delayMs);
+    const totalPRsMerged = await getAggregateMetric(tokenParam, repos, `is:pr is:merged merged:>=${dateOnly}`);
 
     // Open PRs (use pre-fetched GraphQL count for 100% accuracy)
     const totalOpenPRs = openPRsCount;
 
     // Issues opened in window
-    const totalIssuesOpened = await chunkedRepoSearchCount(client, username, repos, `is:issue created:>=${dateOnly}`, tokenParam, SEARCH_REPO_CHUNK_SIZE, delayMs);
+    const totalIssuesOpened = await getAggregateMetric(tokenParam, repos, `is:issue created:>=${dateOnly}`);
 
     // Issues closed in window
-    const totalIssuesClosed = await chunkedRepoSearchCount(client, username, repos, `is:issue closed:>=${dateOnly}`, tokenParam, SEARCH_REPO_CHUNK_SIZE, delayMs);
+    const totalIssuesClosed = await getAggregateMetric(tokenParam, repos, `is:issue closed:>=${dateOnly}`);
 
     // Open issues (use pre-fetched GraphQL count for 100% accuracy)
     const totalOpenIssues = openIssuesCount;
@@ -733,7 +713,7 @@ export const generateBadges = async (
     }
 
     // Diagnostics
-    core.info(`Total repositories: ${repoCount}`);
+    core.info(`My repositories: ${repoCount}`);
     core.info(`Total PRs created in last ${daysCount} days: ${totalPRsCreated}`);
     core.info(`Total PRs merged in last ${daysCount} days: ${totalPRsMerged}`);
     core.info(`Total Open PRs: ${totalOpenPRs}`);
@@ -748,7 +728,7 @@ export const generateBadges = async (
 
     // Build badges in requested order
     const badges = [
-      generateBadgeMarkdown(`Total repositories`, repoCount, msgColor, lblColor),
+      generateBadgeMarkdown(`My Repositories`, repoCount, msgColor, lblColor),
       generateBadgeMarkdown(`PRs created in last ${daysCount} days`, totalPRsCreated, msgColor, lblColor),
       generateBadgeMarkdown(`Merged PRs in last ${daysCount} days`, totalPRsMerged, msgColor, lblColor),
       generateBadgeMarkdown(`Open PRs`, totalOpenPRs, msgColor, lblColor),
