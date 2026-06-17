@@ -40,37 +40,15 @@ jobs:
 
       - name: install & run user-readme-badge-generator
         id: user-readme-badge-generator
-        working-directory: ./.github/actions/user-readme-badge-generator
-        run: |
-          set -euo pipefail
-          # prefer npm ci for reproducible installs when lockfile exists
-          if [ -f package-lock.json ]; then
-            npm ci --no-audit --no-fund
-          else
-            npm install --no-audit --no-fund
-          fi
-
-          echo "Installed packages:"
-          ls -la node_modules | sed -n '1,200p' || true
-
-          # verify the octokit import works (ESM dynamic import)
-          node -e "import('@octokit/graphql').then(()=>console.log('@octokit/graphql OK')).catch(e=>{console.error('IMPORT ERROR:', e.message); process.exit(1)})"
-
-          # run the action
-          node src/index.js
-        env:
-          INPUT_USERNAME: ${{ github.repository_owner }}
-          INPUT_TOKEN: ${{ steps.app-token.outputs.token }}
-          # INPUT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          INPUT_GRAPHQL_URL: ${{ github.graphql_url }}
-          INPUT_DAYS: '30'
-          INPUT_COLOR: 'blue'
-          INPUT_LABEL_COLOR: '555'
-          INPUT_EXCLUDE_FORKS: 'true'                  # <= new input: 'true' (default) or 'false'
-          INPUT_BATCH_SIZE: '1'
-          INPUT_DELAY_MS: '2000'
-          INPUT_MAX_COMMIT_FALLBACK: '1000'           # cap per-repo processed commits in fallback
-          INPUT_COMMIT_FALLBACK_THRESHOLD: '500'       # only fallback when repo commit count <= this
+        uses: ./.github/actions/user-readme-badge-generator
+        with:
+          username: ${{ github.repository_owner }}
+          token: ${{ steps.app-token.outputs.token }}
+          days: '30'
+          color: 'blue'
+          label_color: '555'
+          exclude_forks: 'true'
+          delay_ms: '2000'
     
       - name: write to job summary
         run: |
