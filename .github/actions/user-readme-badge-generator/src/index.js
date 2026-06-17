@@ -175,8 +175,6 @@ export const getRepositories = async (username, graphqlClient, excludeForks = tr
   let endCursor = null;
   let hasNextPage = true;
   const repositories = [];
-  let openIssuesCount = 0;
-  let openPRsCount = 0;
 
   while (hasNextPage) {
     const response = await withBackoff(() =>
@@ -203,52 +201,18 @@ export const getRepositories = async (username, graphqlClient, excludeForks = tr
     const repoNodes = response.repositoryOwner.repositories.nodes || [];
     for (const r of repoNodes) {
       if (excludeForks && r.isFork) continue;
-      repositories.push(r.nameWithOwner);
-      openIssuesCount += r.issues?.totalCount || 0;
-      openPRsCount += r.pullRequests?.totalCount || 0;
+      repositories.push({
+        nameWithOwner: r.nameWithOwner,
+        openIssues: r.issues?.totalCount || 0,
+        openPRs: r.pullRequests?.totalCount || 0
+      });
     }
     hasNextPage = response.repositoryOwner.repositories.pageInfo.hasNextPage;
     endCursor = response.repositoryOwner.repositories.pageInfo.endCursor;
   }
-  return { repositories, openIssuesCount, openPRsCount };
-};
-
-/* -------------------------
-   PR / Issue metric helpers
-   ------------------------- */
-
-export const getPRsCreatedForRepo = async (client, owner, repo, sinceIso) => {
-  const dateOnly = new Date(sinceIso).toISOString().split('T')[0];
-  const q = `repo:${owner}/${repo} is:pr created:>=${dateOnly}`;
-  return getSearchCount(client, q);
-};
-
-export const getPRsMergedForRepo = async (client, owner, repo, sinceIso) => {
-  const dateOnly = new Date(sinceIso).toISOString().split('T')[0];
-  const q = `repo:${owner}/${repo} is:pr is:merged merged:>=${dateOnly}`;
-  return getSearchCount(client, q);
-};
-
-export const getOpenPRsForRepo = async (client, owner, repo) => {
-  const q = `repo:${owner}/${repo} is:pr is:open`;
-  return getSearchCount(client, q);
-};
-
-export const getIssuesOpenedForRepo = async (client, owner, repo, sinceIso) => {
-  const dateOnly = new Date(sinceIso).toISOString().split('T')[0];
-  const q = `repo:${owner}/${repo} is:issue created:>=${dateOnly}`;
-  return getSearchCount(client, q);
-};
-
-export const getIssuesClosedForRepo = async (client, owner, repo, sinceIso) => {
-  const dateOnly = new Date(sinceIso).toISOString().split('T')[0];
-  const q = `repo:${owner}/${repo} is:issue closed:>=${dateOnly}`;
-  return getSearchCount(client, q);
-};
-
-export const getOpenIssuesForRepo = async (client, owner, repo) => {
-  const q = `repo:${owner}/${repo} is:issue is:open`;
-  return getSearchCount(client, q);
+  // Sort alphabetically by nameWithOwner
+  repositories.sort((a, b) => a.nameWithOwner.localeCompare(b.nameWithOwner));
+  return repositories;
 };
 
 /* -------------------------
@@ -277,222 +241,6 @@ export const getContributorsListForRepo = async (token, owner, repo, perPage = 1
   }
   return contributors;
 };
-
-export const getContributorsActiveListForRepo = async (token, owner, repo, sinceIso, maxPages = 10) => {
-  const dateOnly = new Date(sinceIso).toISOString().split('T')[0];
-  const q = encodeURIComponent(`repo:${owner}/${repo} author-date:>=${dateOnly}`);
-  const baseUrl = `https://api.github.com/search/commits?q=${q}&per_page=100`;
-  const list = [];
-  const seen = new Set();
-  for (let page = 1; page <= maxPages; page++) {
-    const url = `${baseUrl}&page=${page}`;
-    try {
-      const { json } = await withBackoff(() => restFetch(url, token, { accept: 'application/vnd.github.cloak-preview' }));
-      const items = json.items || [];
-      for (const item of items) {
-        const authorLogin = item.author?.login;
-        if (authorLogin) {
-          if (!seen.has(authorLogin)) {
-            seen.add(authorLogin);
-            list.push(authorLogin);
-          }
-        } else {
-          const email = item.commit?.author?.email || item.commit?.committer?.email;
-          if (email && !seen.has(email)) {
-            seen.add(email);
-            list.push(email);
-          }
-        }
-      }
-      if (!json.items || json.items.length === 0) break;
-      const totalCount = json.total_count || 0;
-      if (seen.size >= totalCount) break;
-      await sleep(300);
-    } catch (err) {
-      core.error(`Commit search failed for ${owner}/${repo} page ${page}: ${err.message}`);
-      break;
-    }
-  }
-  return list;
-};
-
-/* -------------------------
-   Commits counting (GraphQL preferred, REST fallback)
-   ------------------------- */
-
-export const getCommitsCountForRepo = async (token, owner, repo, sinceIso, client) => {
-  // Try GraphQL default branch commit history totalCount (preferred)
-  if (client) {
-    try {
-      const gqlRes = await withBackoff(() =>
-        client(
-          `query ($owner: String!, $name: String!, $since: GitTimestamp!) {
-             repository(owner: $owner, name: $name) {
-               defaultBranchRef {
-                 target {
-                   ... on Commit {
-                     history(since: $since) {
-                       totalCount
-                     }
-                   }
-                 }
-               }
-             }
-           }`,
-          { owner, name: repo, since: sinceIso }
-        )
-      );
-      const count = gqlRes?.repository?.defaultBranchRef?.target?.history?.totalCount;
-      if (typeof count === 'number') {
-        core.debug(`GraphQL commit history for ${owner}/${repo} since ${sinceIso}: ${count}`);
-        return count;
-      }
-      core.debug(`GraphQL commit totalCount not available for ${owner}/${repo}; falling back to REST search`);
-    } catch (err) {
-      core.debug(`GraphQL commit count failed for ${owner}/${repo}: ${err.message}`);
-      // fall through to REST fallback
-    }
-  }
-
-  // REST fallback: search/commits (preview header)
-  try {
-    const dateOnly = new Date(sinceIso).toISOString().split('T')[0];
-    const q = encodeURIComponent(`repo:${owner}/${repo} committer-date:>=${dateOnly}`);
-    const url = `https://api.github.com/search/commits?q=${q}&per_page=1`;
-    const { json } = await withBackoff(() => restFetch(url, token, { accept: 'application/vnd.github.cloak-preview' }));
-    return json.total_count || 0;
-  } catch (err) {
-    core.error(`Commit count search failed for ${owner}/${repo}: ${err.message}`);
-    return 0;
-  }
-};
-
-/* -------------------------
-   Code frequency & commit stats fallback
-   ------------------------- */
-
-/**
- * Per-commit aggregation fallback (accurate but heavy). Bounded by maxCommits.
- * This version restricts commit listing to the repository's default branch by querying
- * the default branch name via GraphQL and passing sha=<defaultBranch> to the commits list.
- *
- * Parameters:
- *   token - repo token
- *   owner, repo
- *   daysWindow - integer days
- *   maxCommits - cap on commits processed
- *   client - GraphQL client (to fetch default branch)
- */
-export const getCodeStatsFromCommits = async (token, owner, repo, daysWindow = 30, maxCommits = 1000, client = null) => {
-  // find default branch name (fallback to 'HEAD' if not available)
-  let defaultBranch = null;
-  if (client) {
-    try {
-      const gql = await withBackoff(() =>
-        client(
-          `query ($owner: String!, $name: String!) {
-             repository(owner: $owner, name: $name) {
-               defaultBranchRef { name }
-             }
-           }`,
-          { owner, name: repo }
-        )
-      );
-      defaultBranch = gql?.repository?.defaultBranchRef?.name || null;
-    } catch (err) {
-      core.debug(`Failed to fetch default branch for ${owner}/${repo}: ${err.message}`);
-    }
-  }
-  const shaParam = defaultBranch ? `&sha=${encodeURIComponent(defaultBranch)}` : '';
-
-  const sinceIso = new Date(Date.now() - daysWindow * 24 * 60 * 60 * 1000).toISOString();
-  const perPage = 100;
-  let page = 1;
-  let processed = 0;
-  let additions = 0;
-  let deletions = 0;
-
-  core.info(`Per-commit aggregation for ${owner}/${repo} on ${defaultBranch || 'default branch'} since ${sinceIso} (max ${maxCommits} commits)`);
-
-  outer: while (true) {
-    const url = `https://api.github.com/repos/${owner}/${repo}/commits?since=${encodeURIComponent(sinceIso)}${shaParam}&per_page=${perPage}&page=${page}`;
-    let commitsPage;
-    try {
-      const { json } = await withBackoff(() => restFetch(url, token));
-      commitsPage = json;
-    } catch (err) {
-      core.error(`Failed to list commits for ${owner}/${repo}: ${err.message}`);
-      break;
-    }
-
-    if (!Array.isArray(commitsPage) || commitsPage.length === 0) break;
-
-    for (const c of commitsPage) {
-      if (processed >= maxCommits) {
-        core.warn(`Reached maxCommits (${maxCommits}) for ${owner}/${repo}; stopping per-commit aggregation`);
-        break outer;
-      }
-      const sha = c.sha;
-      if (!sha) continue;
-      try {
-        const { json: commitData } = await withBackoff(() => restFetch(`https://api.github.com/repos/${owner}/${repo}/commits/${sha}`, token));
-        const stats = commitData.stats || {};
-        additions += Number(stats.additions || 0);
-        deletions += Number(stats.deletions || 0);
-      } catch (err) {
-        core.debug(`Failed to fetch commit ${sha} for ${owner}/${repo}: ${err.message}`);
-      }
-      processed++;
-      await sleep(50);
-    }
-
-    if (commitsPage.length < perPage) break;
-    page++;
-  }
-
-  core.info(`Per-commit aggregated ${processed} commits for ${owner}/${repo}: +${additions} / -${deletions}`);
-  return { additions, deletions };
-};
-
-/* -------------------------
-   Batch processing utilities
-   ------------------------- */
-
-const processReposInBatches = async (repos, owner, token, client, metricFn, batchSize = DEFAULT_BATCH_SIZE, delayMs = DEFAULT_DELAY_MS) => {
-  const results = {};
-  for (let i = 0; i < repos.length; i += batchSize) {
-    const batch = repos.slice(i, i + batchSize);
-    core.debug(`Processing batch ${Math.floor(i / batchSize) + 1} (${batch.length} repos)`);
-    const promises = batch.map((r) => {
-      const [actualOwner, repoName] = r.split('/');
-      return metricFn(actualOwner, repoName, token, client);
-    });
-    const resolved = await Promise.all(promises);
-    for (let j = 0; j < batch.length; j++) {
-      results[batch[j]] = resolved[j];
-    }
-    if (i + batchSize < repos.length) {
-      core.debug(`Sleeping ${delayMs}ms before next batch`);
-      await sleep(delayMs);
-    }
-  }
-  return results;
-};
-
-/* -------------------------
-   Adapter wrappers
-   ------------------------- */
-
-const adapterPRsCreated = async (owner, repo, token, client, sinceIso) => getPRsCreatedForRepo(client, owner, repo, sinceIso);
-const adapterPRsMerged = async (owner, repo, token, client, sinceIso) => getPRsMergedForRepo(client, owner, repo, sinceIso);
-const adapterOpenPRs = async (owner, repo, token, client) => getOpenPRsForRepo(client, owner, repo);
-const adapterIssuesOpened = async (owner, repo, token, client, sinceIso) => getIssuesOpenedForRepo(client, owner, repo, sinceIso);
-const adapterIssuesClosed = async (owner, repo, token, client, sinceIso) => getIssuesClosedForRepo(client, owner, repo, sinceIso);
-const adapterOpenIssues = async (owner, repo, token, client) => getOpenIssuesForRepo(client, owner, repo);
-const adapterContributorsList = async (owner, repo, token) => getContributorsListForRepo(token, owner, repo);
-const adapterContributorsActiveList = async (owner, repo, token, client, sinceIso) => getContributorsActiveListForRepo(token, owner, repo, sinceIso);
-const adapterCommits = async (owner, repo, token, client, sinceIso) => getCommitsCountForRepo(token, owner, repo, sinceIso, client);
-const adapterCodeFreq = async (owner, repo, token, client, sinceIso) => getCodeFrequencyForRepo(token, owner, repo, Math.ceil((Date.now() - new Date(sinceIso)) / (7 * 24 * 60 * 60 * 1000)));
 
 /* -------------------------
    Main orchestration
@@ -544,11 +292,10 @@ export const generateBadges = async (
       throw e;
     }
 
-    // Repositories (filtered)
-    const { repositories: repos, openIssuesCount, openPRsCount } = await getRepositories(username, client, excludeForks);
-    core.info(`Timestamp: repos fetched at ${new Date().toISOString()}`);
-    core.info(`Fetched ${repos.length} repositories (excludeForks=${excludeForks}): ${repos.slice(0, 20).join(', ')}`);
-    const repoCount = repos.length;
+    // Repositories (sorted)
+    const repoNodes = await getRepositories(username, client, excludeForks);
+    const repoCount = repoNodes.length;
+    core.info(`Fetched ${repoCount} repositories (excludeForks=${excludeForks}).`);
 
     // date window
     const date = new Date();
@@ -557,160 +304,122 @@ export const generateBadges = async (
     core.debug(`Filtering metrics for last ${daysCount} days since ${filterDate}`);
     const dateOnly = filterDate.split('T')[0];
 
-    // --- Aggregate metrics (Per-repo REST calls for maximum accuracy) ---
-    const METRIC_DELAY_MS = Math.max(200, delayMs || 200);
+    const repoMetrics = [];
+    const uniqueAllTimeContributors = new Set();
+    const uniqueActiveContributors = new Set();
 
-    async function getAggregateMetric(token, repoList, querySuffix, delay = METRIC_DELAY_MS) {
-      let total = 0;
-      for (const repo of repoList) {
-        const query = `repo:${repo} ${querySuffix}`;
-        const count = await getSearchCount(null, query, token);
-        total += Number(count || 0);
-        await sleep(delay);
-      }
-      return total;
-    }
+    core.info(`Processing ${repoCount} repositories in alphabetical order...`);
 
-    core.info(`Fetching time-windowed metrics for ${repos.length} repositories...`);
+    for (const node of repoNodes) {
+      const repoFullName = node.nameWithOwner;
+      const [owner, name] = repoFullName.split('/');
+      core.info(`[${repoFullName}] Gathering metrics...`);
 
-    // PRs created in window
-    const totalPRsCreated = await getAggregateMetric(tokenParam, repos, `is:pr created:>=${dateOnly}`);
+      const metrics = {
+        name: repoFullName,
+        openIssues: node.openIssues,
+        openPRs: node.openPRs,
+        prsCreated: 0,
+        prsMerged: 0,
+        issuesOpened: 0,
+        issuesClosed: 0,
+        commits: 0,
+        additions: 0,
+        deletions: 0,
+        activeContribs: 0,
+        allTimeContribs: 0
+      };
 
-    // PRs merged in window
-    const totalPRsMerged = await getAggregateMetric(tokenParam, repos, `is:pr is:merged merged:>=${dateOnly}`);
-
-    // Open PRs (use pre-fetched GraphQL count for 100% accuracy)
-    const totalOpenPRs = openPRsCount;
-
-    // Issues opened in window
-    const totalIssuesOpened = await getAggregateMetric(tokenParam, repos, `is:issue created:>=${dateOnly}`);
-
-    // Issues closed in window
-    const totalIssuesClosed = await getAggregateMetric(tokenParam, repos, `is:issue closed:>=${dateOnly}`);
-
-    // Open issues (use pre-fetched GraphQL count for 100% accuracy)
-    const totalOpenIssues = openIssuesCount;
-
-    // Contributors exact unique:
-    const contributorsListPerRepo = await processReposInBatches(
-      repos,
-      username,
-      tokenParam,
-      client,
-      async (owner, repo) => adapterContributorsList(owner, repo, tokenParam),
-      batchSize,
-      delayMs
-    );
-    const uniqueContributors = new Set();
-    for (const arr of Object.values(contributorsListPerRepo)) {
-      if (!Array.isArray(arr)) continue;
-      for (const id of arr) if (id) uniqueContributors.add(id);
-    }
-    const totalContributorsExact = uniqueContributors.size;
-
-    async function getRateLimit(token) {
       try {
-        const { json } = await withBackoff(() => restFetch('https://api.github.com/rate_limit', token));
-        return json.rate?.core || json.rate || null;
-      } catch (err) {
-        core.debug(`rate_limit check failed: ${err.message}`);
-        return null;
-      }
-    }
+        // --- Issue / PR windowed counts (REST Search) ---
+        metrics.prsCreated = await getSearchCount(null, `repo:${repoFullName} is:pr created:>=${dateOnly}`, tokenParam);
+        metrics.prsMerged = await getSearchCount(null, `repo:${repoFullName} is:pr is:merged merged:>=${dateOnly}`, tokenParam);
+        metrics.issuesOpened = await getSearchCount(null, `repo:${repoFullName} is:issue created:>=${dateOnly}`, tokenParam);
+        metrics.issuesClosed = await getSearchCount(null, `repo:${repoFullName} is:issue closed:>=${dateOnly}`, tokenParam);
 
-    const repoList = repos || [];
+        // --- Commit stats & Active Contributors (GraphQL) ---
+        const gqlRes = await withBackoff(() =>
+          client(
+            `query ($owner: String!, $name: String!, $since: GitTimestamp!) {
+               repository(owner: $owner, name: $name) {
+                 defaultBranchRef {
+                   target {
+                     ... on Commit {
+                       history(since: $since, first: 100) {
+                         totalCount
+                         nodes {
+                           additions
+                           deletions
+                           author {
+                             user { login }
+                             email
+                           }
+                         }
+                       }
+                     }
+                   }
+                 }
+               }
+             }`,
+            { owner, name, since: filterDate }
+          )
+        );
 
-    // chunk size and delay tuned for your runs; adjust if needed
-    const ACTIVE_CONTRIB_DELAY_MS = Math.max(1000, delayMs || 1000);
-
-    async function getActiveContributorsAcrossRepos(token, repoList, sinceIso, delay = ACTIVE_CONTRIB_DELAY_MS) {
-      const seen = new Set();
-      for (const fullRepoName of repoList) {
-        core.info(`Fetching active contributors for ${fullRepoName}...`);
-        try {
-          // fetch first page of commits since given date
-          const url = `https://api.github.com/repos/${fullRepoName}/commits?since=${encodeURIComponent(sinceIso)}&per_page=100`;
-          const { json } = await withBackoff(() => restFetch(url, token));
-          
-          if (Array.isArray(json)) {
-            for (const commit of json) {
-              const login = commit.author?.login || commit.committer?.login;
-              if (login) seen.add(login);
-              else {
-                const email = commit.commit?.author?.email || commit.commit?.committer?.email;
-                if (email) seen.add(email);
-              }
+        const history = gqlRes?.repository?.defaultBranchRef?.target?.history;
+        if (history) {
+          metrics.commits = history.totalCount || 0;
+          const activeRepoUsers = new Set();
+          for (const c of history.nodes || []) {
+            metrics.additions += c.additions || 0;
+            metrics.deletions += c.deletions || 0;
+            const login = c.author?.user?.login || c.author?.email;
+            if (login) {
+              activeRepoUsers.add(login);
+              uniqueActiveContributors.add(login);
             }
           }
-          core.debug(`Done ${fullRepoName}. Current unique: ${seen.size}`);
-        } catch (err) {
-          core.error(`Failed to fetch commits for ${fullRepoName}: ${err.message}`);
-        }
-        await sleep(delay);
-      }
-      return Array.from(seen);
-    }
-
-    const activeContribs = await getActiveContributorsAcrossRepos(tokenParam, repoList, filterDate, ACTIVE_CONTRIB_DELAY_MS);
-
-    const totalActiveContributorsExact = new Set(activeContribs).size;
-    core.info(`Active contributors (unique across repo chunks, last ${daysCount}d): ${totalActiveContributorsExact}`);
-
-    // ------- Commits (preferred GraphQL) -------
-    const commitsPerRepo = await processReposInBatches(
-      repos,
-      username,
-      tokenParam,
-      client,
-      async (owner, repo) => adapterCommits(owner, repo, tokenParam, client, filterDate),
-      batchSize,
-      delayMs
-    );
-    const totalCommits = Object.values(commitsPerRepo).reduce((s, v) => s + Number(v || 0), 0);
-
-    // ------- Lines added/deleted: only per-commit fallback (code_frequency disabled)
-    const codeFreqPerRepo = {};
-    const MAX_COMMIT_FALLBACK = maxCommitFallback || 1000;
-    const COMMIT_FALLBACK_THRESHOLD = commitFallbackThreshold || 50;
-
-    for (const repoFullName of repos) {
-      core.info(`Timestamp: start processing ${repoFullName} at ${new Date().toISOString()}`);
-      try {
-        const repoCommitCount = Number(commitsPerRepo[repoFullName] || 0);
-        core.info(`Commit count for ${repoFullName}: ${repoCommitCount}`);
-
-        const [actualOwner, repoName] = repoFullName.split('/');
-
-        if (repoCommitCount === 0) {
-          codeFreqPerRepo[repoFullName] = { additions: 0, deletions: 0 };
-          core.info(`Skipping per-repo stats for ${repoFullName} (0 commits in window).`);
-          continue;
+          metrics.activeContribs = activeRepoUsers.size;
         }
 
-        if (repoCommitCount > COMMIT_FALLBACK_THRESHOLD || repoCommitCount > MAX_COMMIT_FALLBACK) {
-          core.info(`Skipping per-commit fallback for ${repoFullName} due to high commit count (${repoCommitCount}). Adjust INPUT_COMMIT_FALLBACK_THRESHOLD / INPUT_MAX_COMMIT_FALLBACK to change.`);
-          codeFreqPerRepo[repoFullName] = { additions: 0, deletions: 0 };
-          continue;
-        }
+        // --- All-time contributors (REST) ---
+        const contribs = await getContributorsListForRepo(tokenParam, owner, name, 100);
+        metrics.allTimeContribs = contribs.length;
+        for (const c of contribs) uniqueAllTimeContributors.add(c);
 
-        core.info(`Timestamp: start per-commit fallback for ${repoFullName} at ${new Date().toISOString()}`);
-        const fallback = await getCodeStatsFromCommits(tokenParam, actualOwner, repoName, daysCount, MAX_COMMIT_FALLBACK, client);
-        core.info(`Timestamp: done per-commit fallback for ${repoFullName} at ${new Date().toISOString()}`);
-        codeFreqPerRepo[repoFullName] = fallback || { additions: 0, deletions: 0 };
-        core.info(`Per-commit fallback for ${repoFullName}: +${codeFreqPerRepo[repoFullName].additions} / -${codeFreqPerRepo[repoFullName].deletions} (commits=${repoCommitCount})`);
       } catch (err) {
-        core.error(`Code stats processing failed for ${repoFullName}: ${err.message}`);
-        codeFreqPerRepo[repoFullName] = { additions: 0, deletions: 0 };
+        core.error(`Failed to process ${repoFullName}: ${err.message}`);
       }
+
+      repoMetrics.push(metrics);
+      core.info(`[${repoFullName}] Done. (Commits: ${metrics.commits}, Issues: +${metrics.issuesOpened}/-${metrics.issuesClosed}, PRs: +${metrics.prsCreated}/-${metrics.prsMerged})`);
+      await sleep(delayMs || DEFAULT_DELAY_MS);
     }
 
-    let totalAdditions = 0;
-    let totalDeletions = 0;
-    for (const val of Object.values(codeFreqPerRepo)) {
-      if (!val) continue;
-      totalAdditions += Number(val.additions || 0);
-      totalDeletions += Number(val.deletions || 0);
+    // Print Summary Table
+    core.info('\n' + '='.repeat(80));
+    core.info('PER-REPOSITORY METRICS SUMMARY');
+    core.info('='.repeat(80));
+    const header = `${'Repository'.padEnd(30)} | ${'Commits'.padStart(7)} | ${'Issues (O/C)'.padStart(12)} | ${'PRs (C/M)'.padStart(10)} | ${'Lines (+/-)'.padStart(15)}`;
+    core.info(header);
+    core.info('-'.repeat(80));
+    for (const m of repoMetrics) {
+      const line = `${m.name.substring(0, 30).padEnd(30)} | ${String(m.commits).padStart(7)} | ${String(m.issuesOpened + '/' + m.issuesClosed).padStart(12)} | ${String(m.prsCreated + '/' + m.prsMerged).padStart(10)} | ${String('+' + m.additions + '/-' + m.deletions).padStart(15)}`;
+      core.info(line);
     }
+    core.info('='.repeat(80) + '\n');
+
+    // Calculate totals
+    const totalPRsCreated = repoMetrics.reduce((s, m) => s + m.prsCreated, 0);
+    const totalPRsMerged = repoMetrics.reduce((s, m) => s + m.prsMerged, 0);
+    const totalOpenPRs = repoMetrics.reduce((s, m) => s + m.openPRs, 0);
+    const totalIssuesOpened = repoMetrics.reduce((s, m) => s + m.issuesOpened, 0);
+    const totalIssuesClosed = repoMetrics.reduce((s, m) => s + m.issuesClosed, 0);
+    const totalOpenIssues = repoMetrics.reduce((s, m) => s + m.openIssues, 0);
+    const totalContributorsExact = uniqueAllTimeContributors.size;
+    const totalActiveContributorsExact = uniqueActiveContributors.size;
+    const totalCommits = repoMetrics.reduce((s, m) => s + m.commits, 0);
+    const totalAdditions = repoMetrics.reduce((s, m) => s + m.additions, 0);
+    const totalDeletions = repoMetrics.reduce((s, m) => s + m.deletions, 0);
 
     // Diagnostics
     core.info(`My repositories: ${repoCount}`);
