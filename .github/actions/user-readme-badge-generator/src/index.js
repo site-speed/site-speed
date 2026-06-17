@@ -334,19 +334,20 @@ export const generateBadges = async (
         // --- Single Unified GraphQL query for almost everything ---
         const gqlRes = await withBackoff(() =>
           client(
-            `query ($owner: String!, $name: String!, $since: GitTimestamp!) {
+            `query ($owner: String!, $name: String!, $sinceDateTime: DateTime!, $sinceGit: GitTimestamp!) {
                repository(owner: $owner, name: $name) {
-                 # Issues windowed
-                 openedIssues: issues(filterBy: {since: $since}) { totalCount }
-                 closedIssues: issues(filterBy: {since: $since, states: CLOSED}) { totalCount }
+                 # Issues windowed (uses DateTime)
+                 openedIssues: issues(filterBy: {since: $sinceDateTime}) { totalCount }
+                 closedIssues: issues(filterBy: {since: $sinceDateTime, states: CLOSED}) { totalCount }
                  
-                 # PRs windowed (GraphQL is limited for 'merged' filtering, we'll keep Search for now but optimize Issues)
+                 # PRs windowed
                  openedPRs: pullRequests(first: 1) { totalCount } 
                  
                  defaultBranchRef {
                    target {
                      ... on Commit {
-                       history(since: $since, first: 100) {
+                       # Commits windowed (uses GitTimestamp)
+                       history(since: $sinceGit, first: 100) {
                          totalCount
                          nodes {
                            additions
@@ -362,7 +363,7 @@ export const generateBadges = async (
                  }
                }
              }`,
-            { owner, name, since: filterDate }
+            { owner, name, sinceDateTime: filterDate, sinceGit: filterDate }
           )
         );
 

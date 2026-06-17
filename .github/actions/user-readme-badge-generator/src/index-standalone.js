@@ -228,12 +228,17 @@ export const generateBadges = async (
 
     const gqlRes = await withBackoff(() =>
       client(
-        \`query ($owner: String!, $name: String!, $since: GitTimestamp!) {
+        `query ($owner: String!, $name: String!, $sinceDateTime: DateTime!, $sinceGit: GitTimestamp!) {
            repository(owner: $owner, name: $name) {
+             # Issues windowed (uses DateTime)
+             openedIssues: issues(filterBy: {since: $sinceDateTime}) { totalCount }
+             closedIssues: issues(filterBy: {since: $sinceDateTime, states: CLOSED}) { totalCount }
+
              defaultBranchRef {
                target {
                  ... on Commit {
-                   history(since: $since, first: 100) {
+                   # Commits windowed (uses GitTimestamp)
+                   history(since: $sinceGit, first: 100) {
                      totalCount
                      nodes {
                        additions
@@ -248,12 +253,18 @@ export const generateBadges = async (
                }
              }
            }
-         }\`,
-        { owner, name, since: filterDate }
+         }`,
+        { owner, name, sinceDateTime: filterDate, sinceGit: filterDate }
       )
     );
 
-    const history = gqlRes?.repository?.defaultBranchRef?.target?.history;
+    const repoObj = gqlRes?.repository;
+    const history = repoObj?.defaultBranchRef?.target?.history;
+
+    // Use GraphQL for Issues
+    const totalIssuesOpened = repoObj?.openedIssues?.totalCount || 0;
+    const totalIssuesClosed = repoObj?.closedIssues?.totalCount || 0;
+
     if (history) {
       totalCommits = history.totalCount || 0;
       const seenActive = new Set();
