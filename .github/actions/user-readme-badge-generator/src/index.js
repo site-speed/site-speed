@@ -331,17 +331,18 @@ export const generateBadges = async (
       };
 
       try {
-        // --- Issue / PR windowed counts (REST Search) ---
-        metrics.prsCreated = await getSearchCount(null, `repo:${repoFullName} is:pr created:>=${dateOnly}`, tokenParam);
-        metrics.prsMerged = await getSearchCount(null, `repo:${repoFullName} is:pr is:merged merged:>=${dateOnly}`, tokenParam);
-        metrics.issuesOpened = await getSearchCount(null, `repo:${repoFullName} is:issue created:>=${dateOnly}`, tokenParam);
-        metrics.issuesClosed = await getSearchCount(null, `repo:${repoFullName} is:issue closed:>=${dateOnly}`, tokenParam);
-
-        // --- Commit stats & Active Contributors (GraphQL) ---
+        // --- Single Unified GraphQL query for almost everything ---
         const gqlRes = await withBackoff(() =>
           client(
             `query ($owner: String!, $name: String!, $since: GitTimestamp!) {
                repository(owner: $owner, name: $name) {
+                 # Issues windowed
+                 openedIssues: issues(filterBy: {since: $since}) { totalCount }
+                 closedIssues: issues(filterBy: {since: $since, states: CLOSED}) { totalCount }
+                 
+                 # PRs windowed (GraphQL is limited for 'merged' filtering, we'll keep Search for now but optimize Issues)
+                 openedPRs: pullRequests(first: 1) { totalCount } 
+                 
                  defaultBranchRef {
                    target {
                      ... on Commit {
@@ -365,7 +366,17 @@ export const generateBadges = async (
           )
         );
 
-        const history = gqlRes?.repository?.defaultBranchRef?.target?.history;
+        const repoObj = gqlRes?.repository;
+        const history = repoObj?.defaultBranchRef?.target?.history;
+
+        // Use GraphQL for Issues (more reliable and saves Search API quota)
+        metrics.issuesOpened = repoObj?.openedIssues?.totalCount || 0;
+        metrics.issuesClosed = repoObj?.closedIssues?.totalCount || 0;
+
+        // Still need Search for PRs as GraphQL 'pullRequests' filter is weak
+        metrics.prsCreated = await getSearchCount(null, `repo:${repoFullName} is:pr created:>=${dateOnly}`, tokenParam);
+        metrics.prsMerged = await getSearchCount(null, `repo:${repoFullName} is:pr is:merged merged:>=${dateOnly}`, tokenParam);
+
         if (history) {
           metrics.commits = history.totalCount || 0;
           const activeRepoUsers = new Set();
