@@ -1,0 +1,20 @@
+{
+  "name": "readme-badge-generator",
+  "version": "1.0.0",
+  "description": "Generates markdown badges for a single GitHub repository",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "ncc build src/index.js -o dist --minify --no-cache"
+  },
+  "dependencies": {
+    "@actions/core": "^3.0.1",
+    "@octokit/graphql": "^9.0.3"
+  },
+  "devDependencies": {
+    "@vercel/ncc": "^0.38.4"
+  }
+}

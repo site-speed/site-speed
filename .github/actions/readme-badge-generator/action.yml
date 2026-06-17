@@ -1,0 +1,36 @@
+name: 'Repository README Badge Generator'
+description: 'Generates markdown badges for a single GitHub repository'
+author: 'site-speed'
+inputs:
+  username:
+    description: 'The GitHub username/owner'
+    required: true
+  token:
+    description: 'The GitHub token'
+    required: true
+  days:
+    description: 'The number of days for windowed metrics'
+    required: false
+    default: '30'
+  color:
+    description: 'Badge color'
+    required: false
+    default: 'blue'
+  label_color:
+    description: 'Badge label color'
+    required: false
+    default: '555'
+  graphql_url:
+    description: 'The GitHub GraphQL API URL'
+    required: false
+    default: 'https://api.github.com/graphql'
+  delay_ms:
+    description: 'Delay between API calls in milliseconds'
+    required: false
+    default: '1000'
+outputs:
+  badges:
+    description: 'The generated markdown badges'
+runs:
+  using: 'node24'
+  main: 'dist/index.js'

@@ -7,6 +7,9 @@
   "engines": {
     "node": ">=24"
   },
+  "scripts": {
+    "build": "ncc build src/index.js -o dist --minify --no-cache"
+  },
   "dependencies": {
     "@actions/core": "^3.0.1",
     "@octokit/graphql": "^9.0.3"
