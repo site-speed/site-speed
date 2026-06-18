@@ -448,19 +448,35 @@ export const generateBadges = async (
     core.info(`Total lines deleted in last ${daysCount} days: ${totalDeletions}`);
 
     // Build badges in requested order
-    const badges = [
+    const prBadges = [
       generateBadgeMarkdown(`My Repositories`, repoCount, msgColor, lblColor),
       generateBadgeMarkdown(`PRs created in last ${daysCount} days`, totalPRsCreated, msgColor, lblColor),
       generateBadgeMarkdown(`Merged PRs in last ${daysCount} days`, totalPRsMerged, msgColor, lblColor),
-      generateBadgeMarkdown(`Open PRs`, totalOpenPRs, msgColor, lblColor),
-      generateBadgeMarkdown(`Issues opened in last ${daysCount} days`, totalIssuesOpened, msgColor, lblColor),
-      generateBadgeMarkdown(`Issues closed in last ${daysCount} days`, totalIssuesClosed, msgColor, lblColor),
-      generateBadgeMarkdown(`Open issues`, totalOpenIssues, msgColor, lblColor),
-      generateBadgeMarkdown(`Contributors (unique)`, totalContributorsExact, msgColor, lblColor),
-      generateBadgeMarkdown(`Active contributors (last ${daysCount}d)`, totalActiveContributorsExact, msgColor, lblColor),
+      generateBadgeMarkdown(`Open PRs`, totalOpenPRs, msgColor, lblColor)
+    ];
+
+    const issueBadges = [
+      generateBadgeMarkdown(`Issues opened in last ${daysCount} days`, totalIssuesOpened, 'green', lblColor),
+      generateBadgeMarkdown(`Issues closed in last ${daysCount} days`, totalIssuesClosed, 'red', lblColor),
+      generateBadgeMarkdown(`Open issues`, totalOpenIssues, msgColor, lblColor)
+    ];
+
+    const commitBadges = [
       generateBadgeMarkdown(`Commits in last ${daysCount} days`, totalCommits, msgColor, lblColor),
-      generateBadgeMarkdown(`Lines added (last ${daysCount} days)`, totalAdditions, msgColor, lblColor),
-      generateBadgeMarkdown(`Lines deleted (last ${daysCount} days)`, totalDeletions, msgColor, lblColor)
+      generateBadgeMarkdown(`Lines added (last ${daysCount} days)`, totalAdditions, 'green', lblColor),
+      generateBadgeMarkdown(`Lines deleted (last ${daysCount} days)`, totalDeletions, 'red', lblColor)
+    ];
+
+    const contributorBadges = [
+      generateBadgeMarkdown(`Contributors (unique)`, totalContributorsExact, msgColor, lblColor),
+      generateBadgeMarkdown(`Active contributors (last ${daysCount}d)`, totalActiveContributorsExact, msgColor, lblColor)
+    ];
+
+    const badges = [
+      prBadges.join(' '),
+      issueBadges.join(' '),
+      commitBadges.join(' '),
+      contributorBadges.join(' ')
     ];
 
     return badges;
@@ -491,7 +507,7 @@ export async function runAction(config) {
     cfg.commitFallbackThreshold
   );
   core.info('');
-  const badgesMarkdown = badges.join(' ');
+  const badgesMarkdown = badges.join('\n');
   core.info(`Badge markdown: ${badgesMarkdown}`);
   core.setOutput('badges', badgesMarkdown);
   return badges;
