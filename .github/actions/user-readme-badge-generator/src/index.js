@@ -320,7 +320,7 @@ export const generateBadges = async (
         openIssues: node.openIssues,
         openPRs: node.openPRs,
         prsCreated: 0,
-        prsMerged: 0,
+        prsClosed: 0,
         issuesOpened: 0,
         issuesClosed: 0,
         commits: 0,
@@ -376,7 +376,7 @@ export const generateBadges = async (
 
         // Still need Search for PRs as GraphQL 'pullRequests' filter is weak
         metrics.prsCreated = await getSearchCount(null, `repo:${repoFullName} is:pr created:>=${dateOnly}`, tokenParam);
-        metrics.prsMerged = await getSearchCount(null, `repo:${repoFullName} is:pr is:merged merged:>=${dateOnly}`, tokenParam);
+        metrics.prsClosed = await getSearchCount(null, `repo:${repoFullName} is:pr is:closed closed:>=${dateOnly}`, tokenParam);
 
         if (history) {
           metrics.commits = history.totalCount || 0;
@@ -403,7 +403,7 @@ export const generateBadges = async (
       }
 
       repoMetrics.push(metrics);
-      core.info(`[${repoFullName}] Done. (Commits: ${metrics.commits}, Issues: +${metrics.issuesOpened}/-${metrics.issuesClosed}, PRs: +${metrics.prsCreated}/-${metrics.prsMerged})`);
+      core.info(`[${repoFullName}] Done. (Commits: ${metrics.commits}, Issues: +${metrics.issuesOpened}/-${metrics.issuesClosed}, PRs: +${metrics.prsCreated}/-${metrics.prsClosed})`);
       await sleep(delayMs || DEFAULT_DELAY_MS);
     }
 
@@ -411,18 +411,18 @@ export const generateBadges = async (
     core.info('\n' + '='.repeat(80));
     core.info('PER-REPOSITORY METRICS SUMMARY');
     core.info('='.repeat(80));
-    const header = `${'Repository'.padEnd(30)} | ${'Commits'.padStart(7)} | ${'Issues (O/C)'.padStart(12)} | ${'PRs (C/M)'.padStart(10)} | ${'Lines (+/-)'.padStart(15)}`;
+    const header = `${'Repository'.padEnd(30)} | ${'Commits'.padStart(7)} | ${'Issues (O/C)'.padStart(12)} | ${'PRs (O/C)'.padStart(10)} | ${'Lines (+/-)'.padStart(15)}`;
     core.info(header);
     core.info('-'.repeat(80));
     for (const m of repoMetrics) {
-      const line = `${m.name.substring(0, 30).padEnd(30)} | ${String(m.commits).padStart(7)} | ${String(m.issuesOpened + '/' + m.issuesClosed).padStart(12)} | ${String(m.prsCreated + '/' + m.prsMerged).padStart(10)} | ${String('+' + m.additions + '/-' + m.deletions).padStart(15)}`;
+      const line = `${m.name.substring(0, 30).padEnd(30)} | ${String(m.commits).padStart(7)} | ${String(m.issuesOpened + '/' + m.issuesClosed).padStart(12)} | ${String(m.prsCreated + '/' + m.prsClosed).padStart(10)} | ${String('+' + m.additions + '/-' + m.deletions).padStart(15)}`;
       core.info(line);
     }
     core.info('='.repeat(80) + '\n');
 
     // Calculate totals
     const totalPRsCreated = repoMetrics.reduce((s, m) => s + m.prsCreated, 0);
-    const totalPRsMerged = repoMetrics.reduce((s, m) => s + m.prsMerged, 0);
+    const totalPRsClosed = repoMetrics.reduce((s, m) => s + m.prsClosed, 0);
     const totalOpenPRs = repoMetrics.reduce((s, m) => s + m.openPRs, 0);
     const totalIssuesOpened = repoMetrics.reduce((s, m) => s + m.issuesOpened, 0);
     const totalIssuesClosed = repoMetrics.reduce((s, m) => s + m.issuesClosed, 0);
@@ -436,7 +436,7 @@ export const generateBadges = async (
     // Diagnostics
     core.info(`My repositories: ${repoCount}`);
     core.info(`Total PRs created in last ${daysCount} days: ${totalPRsCreated}`);
-    core.info(`Total PRs merged in last ${daysCount} days: ${totalPRsMerged}`);
+    core.info(`Total PRs closed in last ${daysCount} days: ${totalPRsClosed}`);
     core.info(`Total Open PRs: ${totalOpenPRs}`);
     core.info(`Total Issues opened in last ${daysCount} days: ${totalIssuesOpened}`);
     core.info(`Total Issues closed in last ${daysCount} days: ${totalIssuesClosed}`);
@@ -450,8 +450,8 @@ export const generateBadges = async (
     // Build badges in requested order
     const prBadges = [
       generateBadgeMarkdown(`My Repositories`, repoCount, msgColor, lblColor),
-      generateBadgeMarkdown(`PRs created in last ${daysCount} days`, totalPRsCreated, msgColor, lblColor),
-      generateBadgeMarkdown(`Merged PRs in last ${daysCount} days`, totalPRsMerged, msgColor, lblColor),
+      generateBadgeMarkdown(`PRs opened in last ${daysCount} days`, totalPRsCreated, 'green', lblColor),
+      generateBadgeMarkdown(`PRs closed in last ${daysCount} days`, totalPRsClosed, 'red', lblColor),
       generateBadgeMarkdown(`Open PRs`, totalOpenPRs, msgColor, lblColor)
     ];
 
@@ -462,9 +462,9 @@ export const generateBadges = async (
     ];
 
     const commitBadges = [
-      generateBadgeMarkdown(`Commits in last ${daysCount} days`, totalCommits, msgColor, lblColor),
       generateBadgeMarkdown(`Lines added (last ${daysCount} days)`, totalAdditions, 'green', lblColor),
-      generateBadgeMarkdown(`Lines deleted (last ${daysCount} days)`, totalDeletions, 'red', lblColor)
+      generateBadgeMarkdown(`Lines deleted (last ${daysCount} days)`, totalDeletions, 'red', lblColor),
+      generateBadgeMarkdown(`Commits in last ${daysCount} days`, totalCommits, msgColor, lblColor)
     ];
 
     const contributorBadges = [

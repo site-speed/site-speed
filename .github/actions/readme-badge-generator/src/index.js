@@ -216,7 +216,7 @@ export const generateBadges = async (
 
     // --- Issue / PR windowed counts (REST Search) ---
     const totalPRsCreated = await getSearchCount(null, `repo:${repository} is:pr created:>=${dateOnly}`, tokenParam);
-    const totalPRsMerged = await getSearchCount(null, `repo:${repository} is:pr is:merged merged:>=${dateOnly}`, tokenParam);
+    const totalPRsClosed = await getSearchCount(null, `repo:${repository} is:pr is:closed closed:>=${dateOnly}`, tokenParam);
 
     // --- Commit stats & Active Contributors (GraphQL) ---
     let totalCommits = 0;
@@ -281,8 +281,8 @@ export const generateBadges = async (
 
     // Build badges in requested order
     const prBadges = [
-      generateBadgeMarkdown(`PRs created in last ${daysCount} days`, totalPRsCreated, msgColor, lblColor),
-      generateBadgeMarkdown(`Merged PRs in last ${daysCount} days`, totalPRsMerged, msgColor, lblColor),
+      generateBadgeMarkdown(`PRs opened in last ${daysCount} days`, totalPRsCreated, 'green', lblColor),
+      generateBadgeMarkdown(`PRs closed in last ${daysCount} days`, totalPRsClosed, 'red', lblColor),
       generateBadgeMarkdown(`Open PRs`, totalOpenPRs, msgColor, lblColor)
     ];
 
@@ -293,9 +293,9 @@ export const generateBadges = async (
     ];
 
     const commitBadges = [
-      generateBadgeMarkdown(`Commits in last ${daysCount} days`, totalCommits, msgColor, lblColor),
       generateBadgeMarkdown(`Lines added (last ${daysCount} days)`, totalAdditions, 'green', lblColor),
-      generateBadgeMarkdown(`Lines deleted (last ${daysCount} days)`, totalDeletions, 'red', lblColor)
+      generateBadgeMarkdown(`Lines deleted (last ${daysCount} days)`, totalDeletions, 'red', lblColor),
+      generateBadgeMarkdown(`Commits in last ${daysCount} days`, totalCommits, msgColor, lblColor)
     ];
 
     const contributorBadges = [
@@ -312,8 +312,8 @@ export const generateBadges = async (
 
     // Diagnostics
     core.info(`Repository: ${repository}`);
-    core.info(`PRs created in last ${daysCount} days: ${totalPRsCreated}`);
-    core.info(`PRs merged in last ${daysCount} days: ${totalPRsMerged}`);
+    core.info(`PRs opened in last ${daysCount} days: ${totalPRsCreated}`);
+    core.info(`PRs closed in last ${daysCount} days: ${totalPRsClosed}`);
     core.info(`Open PRs: ${totalOpenPRs}`);
     core.info(`Issues opened in last ${daysCount} days: ${totalIssuesOpened}`);
     core.info(`Issues closed in last ${daysCount} days: ${totalIssuesClosed}`);
