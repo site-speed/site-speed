@@ -348,7 +348,7 @@ export async function runAction(config) {
     cfg.delayMs
   );
   core.info('');
-  const badgesMarkdown = badges.join('\n');
+  const badgesMarkdown = badges.join('\n\n');
   core.info(`Badge markdown: ${badgesMarkdown}`);
   core.setOutput('badges', badgesMarkdown);
   return badges;
